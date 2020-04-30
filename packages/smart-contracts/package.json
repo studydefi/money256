@@ -1,0 +1,13 @@
+{
+  "name": "money256-smart-contracts",
+  "version": "0.0.1",
+  "description": "Smart contracts for money-256",
+  "main": "index.js",
+  "author": "Kendrick Tan",
+  "license": "MIT",
+  "dependencies": {
+    "@openzeppelin/contracts": "^2.5.1",
+    "@studydefi/money-legos": "^2.0.7",
+    "@truffle/hdwallet-provider": "^1.0.34"
+  }
+}
