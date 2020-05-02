@@ -84,7 +84,7 @@ describe("PricessCFD", () => {
     const expiration = getCurEpoch() + 120; // 2 mins in the future
 
     // Get current ETH collateral requirements
-    const ethCol = await pricelessCFDContract.getETHCollateralRequirements(
+    await pricelessCFDContract.getETHCollateralRequirements(
       daiDeposited,
       curRefAssetPrice
     );

@@ -12,7 +12,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@studydefi/money-legos/uniswap/contracts/IUniswapFactory.sol";
 import "@studydefi/money-legos/uniswap/contracts/IUniswapExchange.sol";
 
-import "./interfaces/IOracle.sol";
+import "./interfaces/OracleInterface.sol";
 import "./interfaces/IMedianizer.sol";
 
 import "./lib/StableMath.sol";
@@ -51,6 +51,8 @@ contract PricelessCFD {
         0x729D19f657BD0614b4985Cf1D82531c67569197B
     );
 
+    OracleInterface oracle;
+
     /***********************************
         CFD Parameters
     ************************************/
@@ -80,6 +82,17 @@ contract PricelessCFD {
     bool public inSettlementPeriod = false;
 
     /***********************************
+        Liquidation data structures
+    ************************************/
+    enum Status {
+        Uninitialized,
+        PreDispute,
+        PendingDispute,
+        DisputeSucceeded,
+        DisputeFailed
+    }
+
+    /***********************************
         Liquidity providers
     ************************************/
     struct MintRequest {
@@ -90,12 +103,12 @@ contract PricelessCFD {
         uint256 shortInEthDeposited;
         uint256 daiDeposited;
         bool processed;
-        bool inDispute;
+        Status status;
     }
 
     // Each mint request needs to wait for ~mintRequestDisputablePeriod
     // before users can process it
-    uint256 public mintRequestDisputablePeriod = 10; // 10 seconds to test
+    uint256 public mintRequestDisputablePeriod = 10;
 
     // MintId => MintRequest
     mapping(uint256 => MintRequest) public mintRequests;
@@ -110,6 +123,18 @@ contract PricelessCFD {
         uint256 daiDeposited
     );
 
+    struct SettleRequest {
+        address settler;
+        uint256 time;
+        Status status;
+    }
+
+    event SettleRequested(address settler, uint256 time);
+
+    uint256 public settleRequestDisputablePeriod = 10;
+    uint256 public settleRequestEthCollateral = 1e18;
+    SettleRequest curSettleRequest;
+
     struct Stake {
         uint256 longLP;
         uint256 shortLP;
@@ -117,25 +142,7 @@ contract PricelessCFD {
         bool liquidated;
     }
 
-    mapping (address => Stake) public stakes;
-
-    /***********************************
-        Liquidation data structures
-    ************************************/
-    enum Status {
-        Uninitialized,
-        PreDispute,
-        PendingDispute,
-        DisputeSucceeded,
-        DisputeFailed
-    }
-
-    struct LiquidationData {
-        uint256 mintId;
-        address liquidator;
-        Status state;
-        uint256 liquidationTimeInitiated;
-    }
+    mapping(address => Stake) public stakes;
 
     /***********************************
         Constructor
@@ -146,7 +153,8 @@ contract PricelessCFD {
         uint256 _settlementEpoch,
         uint256 _refAssetOpeningPrice,
         uint256 _refAssetPriceMaxDelta,
-        uint256 _window
+        uint256 _window,
+        address _oracle
     ) public {
         leverage = _leverage;
         feeRate = _feeRate;
@@ -156,6 +164,8 @@ contract PricelessCFD {
         refAssetPriceMaxDelta = _refAssetPriceMaxDelta;
 
         window = _window;
+
+        oracle = OracleInterface(_oracle);
 
         longToken = new Token("Long Token", "LTKN");
         shortToken = new Token("Short Token", "STKN");
@@ -197,6 +207,10 @@ contract PricelessCFD {
         require(inSettlementPeriod, "Must be in settlement period");
         _;
     }
+
+    /***********************************
+        Disputable
+    ************************************/
 
     /***********************************
         Liquidity providers
@@ -246,7 +260,7 @@ contract PricelessCFD {
             shortInEthDeposited: shortTokenInEth,
             daiDeposited: daiDeposited,
             processed: false,
-            inDispute: false
+            status: Status.PreDispute
         });
 
         mintRequests[curMintId] = mintRequest;
@@ -275,7 +289,11 @@ contract PricelessCFD {
             mintRequest.processed == false,
             "Mint request has been processed!"
         );
-        require(mintRequest.inDispute == false, "Mint request is in dispute!");
+        require(
+            mintRequest.status == Status.PreDispute ||
+                mintRequest.status == Status.DisputeFailed,
+            "Mint request is in dispute!"
+        );
 
         // TODO: Remove below when not testing
         // require(
@@ -283,10 +301,6 @@ contract PricelessCFD {
         //     "Mint request still in disputable period!"
         // );
 
-        require(
-            mintRequest.minter == msg.sender,
-            "Only mint requester can process mint!"
-        );
 
         // 1. Mint the long/short tokens for the synthetic asset
         uint256 daiDepositedHalf = mintRequest.daiDeposited.div(2);
@@ -318,6 +332,53 @@ contract PricelessCFD {
         });
 
         // TODO: Convert DAI into cDAI/aDAI or some interest bearing token
+    }
+
+    function requestSettle() public payable notInSettlementPeriod {
+        // A request to settle is sent
+        require(
+            curSettleRequest.status == Status.Uninitialized,
+            "There is a pending settle request"
+        );
+        require(
+            msg.value >= settleRequestEthCollateral,
+            "Not enough ETH collateral to submit settle request"
+        );
+
+        // Transfer back remaining funds
+        if (msg.value > settleRequestEthCollateral) {
+            msg.sender.call.value(msg.value.sub(settleRequestEthCollateral))(
+                ""
+            );
+        }
+
+        curSettleRequest.settler = msg.sender;
+        curSettleRequest.time = now;
+        curSettleRequest.status = Status.PreDispute;
+
+        emit SettleRequested(msg.sender, now);
+    }
+
+    function processSettleRequest() public notInSettlementPeriod {
+        // A request to settle is sent
+        require(
+            curSettleRequest.time.add(settleRequestDisputablePeriod) >= now,
+            "Settlement request is disputable"
+        );
+        require(
+            curSettleRequest.status == Status.PreDispute ||
+                curSettleRequest.status == Status.DisputeFailed,
+            "Settle request not initialized"
+        );
+
+        // Pay back collateral to settler
+        msg.sender.call.value(settleRequestEthCollateral)("");
+
+        // TODO: Payout interest to settler via cDAI
+
+        inSettlementPeriod = true;
+
+        emit SettleRequested(msg.sender, now);
     }
 
     function getETHCollateralRequirements(
@@ -366,9 +427,10 @@ contract PricelessCFD {
         uint256 deltaWithLeverage = delta.mulTruncate(leverage);
 
         if (deltaWithLeverage > refAssetPriceMaxDelta) {
-            // TODO: Contract will be going to settlement mode (?)
             // Users will have chance to dispute it
-            revert("TODO: Not implemented");
+            revert(
+                "Asset price has exceeded bounds, please settleContract instead"
+            );
         }
 
         uint256 winRate = refAssetOpeningPrice.add(deltaWithLeverage);
