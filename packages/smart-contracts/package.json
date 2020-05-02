@@ -5,9 +5,17 @@
   "main": "index.js",
   "author": "Kendrick Tan",
   "license": "MIT",
+  "scripts": {
+    "test": "jest test/* --no-cache --testTimeout 1000000000"
+  },
   "dependencies": {
     "@openzeppelin/contracts": "^2.5.1",
-    "@studydefi/money-legos": "^2.0.7",
     "@truffle/hdwallet-provider": "^1.0.34"
+  },
+  "devDependencies": {
+    "@studydefi/money-legos": "^2.1.0",
+    "ethers": "^4.0.47",
+    "ganache-core": "^2.10.2",
+    "jest": "^25.5.3"
   }
 }

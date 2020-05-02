@@ -9,11 +9,11 @@ pragma solidity ^0.5.16;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import "@studydefi/money-legos/maker/contracts/IMedianizer.sol";
 import "@studydefi/money-legos/uniswap/contracts/IUniswapFactory.sol";
 import "@studydefi/money-legos/uniswap/contracts/IUniswapExchange.sol";
 
 import "./interfaces/IOracle.sol";
+import "./interfaces/IMedianizer.sol";
 
 import "./lib/StableMath.sol";
 
@@ -21,15 +21,18 @@ import "./Token.sol";
 
 
 contract PricelessCFD {
-    /*
-        Contract for difference contract to long/short the USD/EUR
-    */
+    /***********************************
+        Contract for difference contract to long/short some asset
+        Note the assets will be priced in USD, i.e. <x> USD for 1 unit of Asset
+        We will also hold a couple of assumptions, for e.g. that 1 DAI = 1 USD
+        Therefore, we will be assuming that USD/Asset = DAI/Asset
+    ************************************/
 
     using StableMath for uint256;
 
-    /*
+    /***********************************
         External Contracts
-    */
+    ************************************/
     Token public longToken;
     Token public shortToken;
 
@@ -44,17 +47,23 @@ contract PricelessCFD {
         uniswapFactory.getExchange(address(daiToken))
     );
 
-    /*
+    IMedianizer usdEthPriceFeed = IMedianizer(
+        0x729D19f657BD0614b4985Cf1D82531c67569197B
+    );
+
+    /***********************************
         CFD Parameters
-    */
+    ************************************/
+
+    // Everything is in 18 units of wei
+    // i.e. x2 leverage is 2e18
+    //      100% fee is 1e18, 0.5% fee is 3e15
     uint256 public curMintId;
     uint256 public leverage;
     uint256 public feeRate;
     uint256 public settlementEpoch;
-    uint256 public refAssetOpeningPrice; // Price = Unit in this case
-    uint256 public refAssetMaxUnitDelta; // How much will this contract allow them to deviate from opening price
-    uint256 public refAssetUnitPerTick; // What size is considered a "tick"
-    uint256 public refAssetEthPerTick; // How much ETH per tick
+    uint256 public refAssetOpeningPrice; // Price, we assume it'll be USD/Asset in every case
+    uint256 public refAssetPriceMaxDelta; // How much will this contract allow them to deviate from opening price
     uint256 public totalMintVolumeInEth;
 
     // Because we're using a priceless synthetic
@@ -70,22 +79,41 @@ contract PricelessCFD {
 
     bool public inSettlementPeriod = false;
 
-    /*
+    /***********************************
         Liquidity providers
-    */
-    struct CFDMintData {
+    ************************************/
+    struct MintRequest {
         address minter;
         uint256 mintTime;
         uint256 refAssetPriceAtMint;
-        uint256 longEthUnits;
-        uint256 shortEthUnits;
+        uint256 longInEthDeposited;
+        uint256 shortInEthDeposited;
         uint256 daiDeposited;
+        bool processed;
+        bool inDispute;
     }
-    mapping(uint256 => CFDMintData) public mints;
 
-    /*
+    // Each mint request needs to wait for ~mintRequestDisputablePeriod
+    // before users can process it
+    uint256 public mintRequestDisputablePeriod = 10; // 10 seconds to test
+
+    // MintId => MintRequest
+    mapping(uint256 => MintRequest) public mintRequests;
+
+    event MintRequested(uint256 mintId);
+
+    struct Stake {
+        uint256 longLP;
+        uint256 shortLP;
+        uint256 mintVolumeInDai;
+        bool liquidated;
+    }
+
+    mapping(address => Stake) stakes;
+
+    /***********************************
         Liquidation data structures
-    */
+    ************************************/
     enum Status {
         Uninitialized,
         PreDispute,
@@ -101,17 +129,15 @@ contract PricelessCFD {
         uint256 liquidationTimeInitiated;
     }
 
-    /*
+    /***********************************
         Constructor
-    */
+    ************************************/
     constructor(
         uint256 _leverage,
         uint256 _feeRate,
         uint256 _settlementEpoch,
         uint256 _refAssetOpeningPrice,
-        uint256 _refAssetMaxUnitDelta,
-        uint256 _refAssetUnitPerTick,
-        uint256 _refAssetEthPerTick,
+        uint256 _refAssetPriceMaxDelta,
         uint256 _window
     ) public {
         leverage = _leverage;
@@ -119,14 +145,12 @@ contract PricelessCFD {
         settlementEpoch = _settlementEpoch;
 
         refAssetOpeningPrice = _refAssetOpeningPrice;
-        refAssetMaxUnitDelta = _refAssetMaxUnitDelta;
-        refAssetUnitPerTick = _refAssetUnitPerTick;
-        refAssetEthPerTick = _refAssetEthPerTick;
+        refAssetPriceMaxDelta = _refAssetPriceMaxDelta;
 
         window = _window;
 
-        longToken = new Token("Long USD/EUR", "L_USD_EUR");
-        shortToken = new Token("Short USD/EUR", "S_USD_EUR");
+        longToken = new Token("Long Token", "LTKN");
+        shortToken = new Token("Short Token", "STKN");
 
         // TODO: Switch to balancer?
         uniswapFactory = IUniswapFactory(
@@ -150,9 +174,9 @@ contract PricelessCFD {
         );
     }
 
-    /*
+    /***********************************
         Modifiers
-    */
+    ************************************/
     modifier notInSettlementPeriod() {
         if (now > settlementEpoch) {
             inSettlementPeriod = true;
@@ -166,27 +190,38 @@ contract PricelessCFD {
         _;
     }
 
-    /*
+    /***********************************
         Liquidity providers
-    */
-    function mint(uint256 expiration, uint256 curRefAssetPrice)
-        external
-        payable
-        notInSettlementPeriod
-    {
+    ************************************/
+
+    // Submits a mint request
+    // Will need to approve a similar amount of DAI w.r.t ETH supplied
+    function requestMint(
+        uint256 expiration,
+        uint256 curRefAssetPrice,
+        uint256 daiDeposited
+    ) external payable notInSettlementPeriod returns (uint256) {
         // Make sure liquidity provider is valid
         if (expiration > now.add(window)) {
-            revert("Expiration too large");
+            revert("Expiration time too long");
         }
         if (now > expiration) {
             revert("Minting expired");
         }
 
-        // 1. Calculate the value of the tokens in ETH
+        // 1. Calculate ETH equilavent in DAI
+        // Using a single wei here means 0 slippage and allows pricing from low liq pool
+        // extrapolate to base 1e18 in order to do calcs
+        require(
+            daiToken.transferFrom(msg.sender, address(this), daiDeposited),
+            "Transfer DAI for requestMint failed"
+        );
+
+        // 2. Calculate the value of the tokens in ETH
         (
             uint256 longTokenInEth,
             uint256 shortTokenInEth
-        ) = getETHCollateralRequirements(curRefAssetPrice);
+        ) = getETHCollateralRequirements(daiDeposited, curRefAssetPrice);
 
         uint256 totalEthCollateral = longTokenInEth.add(shortTokenInEth);
         require(msg.value >= totalEthCollateral, "ETH collateral not met");
@@ -194,61 +229,113 @@ contract PricelessCFD {
             msg.sender.transfer(msg.value.sub(totalEthCollateral));
         }
 
-        // 2. Calculate ETH equilavent in DAI
-        uint256 daiCollateralRequirement = uniswapDaiExchange
-            .getEthToTokenInputPrice(totalEthCollateral);
-        require(
-            daiToken.transferFrom(
-                msg.sender,
-                address(this),
-                daiCollateralRequirement
-            ),
-            "Transfer DAI for mint failed"
-        );
+        // 3. Create a mint request
+        MintRequest memory mintRequest = MintRequest({
+            minter: msg.sender,
+            mintTime: now,
+            refAssetPriceAtMint: curRefAssetPrice,
+            longInEthDeposited: longTokenInEth,
+            shortInEthDeposited: shortTokenInEth,
+            daiDeposited: daiDeposited,
+            processed: false,
+            inDispute: false
+        });
 
-        // 3. Mint the long/short tokens for the synthetic asset
-        uint256 daiCollateralHalf = daiCollateralRequirement.div(2);
-        longToken.mint(address(this), daiCollateralHalf);
-        shortToken.mint(address(this), daiCollateralHalf);
+        mintRequests[curMintId] = mintRequest;
 
-        // 4. Contribute to Uniswap
-        uint256 longLP = uniswapLongTokenExchange.addLiquidity.value(
-            longTokenInEth
-        )(1, daiCollateralHalf, now.add(3600));
+        emit MintRequested(curMintId);
 
-        uint256 shortLP = uniswapShortTokenExchange.addLiquidity.value(
-            shortTokenInEth
-        )(1, daiCollateralHalf, now.add(3600));
-
-        // 5. Short the LP and log mint volume
-        totalMintVolumeInEth = totalMintVolumeInEth + totalEthCollateral;
-
-        // TODO: Add mintId and dispute time
-
+        // Bump mint request
         curMintId = curMintId + 1;
+
+        return curMintId - 1;
     }
 
-    function getETHCollateralRequirements(uint256 curRefAssetPrice)
-        public
-        returns (uint256, uint256)
-    {
+    function processMintRequest(uint256 mintId) public notInSettlementPeriod {
+        MintRequest memory mintRequest = mintRequests[mintId];
+
+        // Make sure only mintRequest hasn't been processed yet
+        require(
+            mintRequest.processed == false,
+            "Mint request has been processed!"
+        );
+        require(mintRequest.inDispute == false, "Mint request is in dispute!");
+        require(
+            mintRequest.mintTime.add(mintRequestDisputablePeriod) <= now,
+            "Mint request still in disputable period!"
+        );
+        require(
+            mintRequest.minter == msg.sender,
+            "Only mint requester can process mint!"
+        );
+
+        // 1. Mint the long/short tokens for the synthetic asset
+        uint256 daiDepositedHalf = mintRequest.daiDeposited.div(2);
+        longToken.mint(address(this), daiDepositedHalf);
+        shortToken.mint(address(this), daiDepositedHalf);
+
+        // 2. Contribute to Uniswap
+        uint256 longLP = uniswapLongTokenExchange.addLiquidity.value(
+            mintRequest.longInEthDeposited
+        )(1, daiDepositedHalf, now.add(3600));
+
+        uint256 shortLP = uniswapShortTokenExchange.addLiquidity.value(
+            mintRequest.shortInEthDeposited
+        )(1, daiDepositedHalf, now.add(3600));
+
+        // 3. Save total mint volume in ETH
+        totalMintVolumeInEth = totalMintVolumeInEth
+            .add(mintRequest.longInEthDeposited)
+            .add(mintRequest.shortInEthDeposited);
+
+        // 4. Save to staker's profile
+        stakes[msg.sender] = Stake({
+            longLP: stakes[msg.sender].longLP.add(longLP),
+            shortLP: stakes[msg.sender].shortLP.add(shortLP),
+            mintVolumeInDai: stakes[msg.sender].mintVolumeInDai.add(
+                mintRequest.daiDeposited
+            ),
+            liquidated: false
+        });
+
+        // TODO: Convert DAI into cDAI/aDAI or some interest bearing token
+    }
+
+    function getETHCollateralRequirements(
+        uint256 daiDeposited,
+        uint256 curRefAssetPrice
+    ) public view returns (uint256, uint256) {
+        // Individual deposits
+        uint256 individualDeposits = daiDeposited.div(2);
+
+        // Get (leverage) rates for long/short token, according to the
+        // supplied reference price
         (uint256 longRate, uint256 shortRate) = getLongShortRates(
             curRefAssetPrice
         );
 
-        uint256 totalLongInTicks = longRate.divPrecisely(refAssetUnitPerTick);
-        uint256 totalShortInTicks = shortRate.divPrecisely(refAssetUnitPerTick);
+        uint256 totalLongDaiValue = longRate.mulTruncate(individualDeposits);
+        uint256 totalShortDaiValue = shortRate.mulTruncate(individualDeposits);
 
-        // Get ETH amount needed for
+        // Rate is USD/Asset or DAI/Asset
+        // Assume 1 DAI = 1 USD
+        // Get current DAI per ETH
+        uint256 daiPerEthSimple = uniswapDaiExchange.getEthToTokenInputPrice(
+            1e6
+        );
+        uint256 daiPerEthExact = daiPerEthSimple.mul(1e12);
+
+        // Get ETH per Asset
         return (
-            totalLongInTicks.mulTruncate(refAssetEthPerTick),
-            totalShortInTicks.mulTruncate(refAssetEthPerTick)
+            totalLongDaiValue.divPrecisely(daiPerEthExact),
+            totalShortDaiValue.divPrecisely(daiPerEthExact)
         );
     }
 
     // What are the current exchange rates for long/short token rates
     function getLongShortRates(uint256 curRefAssetPrice)
         public
+        view
         returns (uint256, uint256)
     {
         bool priceIsPositive = curRefAssetPrice > refAssetOpeningPrice;
@@ -259,7 +346,7 @@ contract PricelessCFD {
 
         uint256 deltaWithLeverage = delta.mulTruncate(leverage);
 
-        if (deltaWithLeverage > refAssetMaxUnitDelta) {
+        if (deltaWithLeverage > refAssetPriceMaxDelta) {
             // TODO: Contract will be going to settlement mode (?)
             // Users will have chance to dispute it
             revert("TODO: Not implemented");
