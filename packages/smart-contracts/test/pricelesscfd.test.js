@@ -1,9 +1,15 @@
 const { ethers } = require("ethers");
-const Ganache = require("ganache-core");
+const { BigNumber } = require("ethers/utils/bignumber");
 
 const { legos } = require("@studydefi/money-legos");
 
 const pricelessCFDDef = require("../build/PricelessCFD.json");
+
+const zeroBN = new BigNumber(0);
+
+const sleep = (ms) => {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+};
 
 const provider = new ethers.providers.JsonRpcProvider(
   process.env.PROVIDER_URL || "http://localhost:8545"
@@ -61,7 +67,7 @@ beforeAll(async () => {
 });
 
 describe("PricessCFD", () => {
-  test("requestMint", async () => {
+  test("requestMint and processMintId", async () => {
     // The asset's price is initialized at 1 DAI,
     // with leverage of 5,
     // window of 600 seconds
@@ -82,7 +88,7 @@ describe("PricessCFD", () => {
       daiDeposited,
       curRefAssetPrice
     );
-    
+
     // Approve contract to get funds from contract
     await daiContract.approve(pricelessCFDContract.address, daiDeposited);
 
@@ -100,6 +106,15 @@ describe("PricessCFD", () => {
     const reqMintEvent = reqMintTxRecp.events[1];
     const mintId = reqMintEvent.args.mintId;
 
-    //
+    // Process mint request
+    const tx = await pricelessCFDContract.processMintRequest(mintId);
+    await tx.wait();
+
+    // Make sure we have stakes after minting
+    const stake = await pricelessCFDContract.stakes(wallet.address);
+
+    expect(stake.longLP.gt(zeroBN)).toBe(true);
+    expect(stake.shortLP.gt(zeroBN)).toBe(true);
+    expect(stake.mintVolumeInDai.gt(zeroBN)).toBe(true);
   });
 });

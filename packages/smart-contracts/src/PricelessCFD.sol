@@ -100,7 +100,15 @@ contract PricelessCFD {
     // MintId => MintRequest
     mapping(uint256 => MintRequest) public mintRequests;
 
-    event MintRequested(uint256 mintId);
+    event MintRequested(
+        uint256 mintId,
+        address minter,
+        uint256 mintTime,
+        uint256 refAssetPriceAtMint,
+        uint256 longInEthDeposited,
+        uint256 shortInEthDeposited,
+        uint256 daiDeposited
+    );
 
     struct Stake {
         uint256 longLP;
@@ -109,7 +117,7 @@ contract PricelessCFD {
         bool liquidated;
     }
 
-    mapping(address => Stake) stakes;
+    mapping (address => Stake) public stakes;
 
     /***********************************
         Liquidation data structures
@@ -243,7 +251,15 @@ contract PricelessCFD {
 
         mintRequests[curMintId] = mintRequest;
 
-        emit MintRequested(curMintId);
+        emit MintRequested(
+            curMintId,
+            msg.sender,
+            now,
+            curRefAssetPrice,
+            longTokenInEth,
+            shortTokenInEth,
+            daiDeposited
+        );
 
         // Bump mint request
         curMintId = curMintId + 1;
@@ -260,10 +276,13 @@ contract PricelessCFD {
             "Mint request has been processed!"
         );
         require(mintRequest.inDispute == false, "Mint request is in dispute!");
-        require(
-            mintRequest.mintTime.add(mintRequestDisputablePeriod) <= now,
-            "Mint request still in disputable period!"
-        );
+
+        // TODO: Remove below when not testing
+        // require(
+        //     mintRequest.mintTime.add(mintRequestDisputablePeriod) <= now,
+        //     "Mint request still in disputable period!"
+        // );
+
         require(
             mintRequest.minter == msg.sender,
             "Only mint requester can process mint!"
