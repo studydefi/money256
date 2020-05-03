@@ -56,6 +56,7 @@ contract PricelessCFD {
     /***********************************
         CFD Parameters
     ************************************/
+    bytes32 public identifier = "PricelessCFD";
 
     // Everything is in 18 units of wei
     // i.e. x2 leverage is 2e18
@@ -99,40 +100,47 @@ contract PricelessCFD {
         address minter;
         uint256 mintTime;
         uint256 refAssetPriceAtMint;
-        uint256 longInEthDeposited;
-        uint256 shortInEthDeposited;
-        uint256 daiDeposited;
-        bool processed;
-        Status status;
+        uint256 longInEthDeposited; // Long token in ETH
+        uint256 shortInEthDeposited; // Short token in ETH
+        uint256 daiDeposited; // How much DAI has been deposited
+        bool processed; // Has the mint request been processed
+        Status status; // State of the mint request
+        address disputer; // Person who is disputing a liquidation
     }
 
     // Each mint request needs to wait for ~mintRequestDisputablePeriod
-    // before users can process it
-    uint256 public mintRequestDisputablePeriod = 10;
+    // before users can process it (in seconds)
+    // TODO: Change this when not testing
+    uint256 public mintRequestDisputablePeriod = 0;
+
+    // Collateral needed to dispute a mint request (0.1 ETH)
+    uint256 public disputeMintRequestFee = 1e17;
 
     // MintId => MintRequest
     mapping(uint256 => MintRequest) public mintRequests;
 
-    event MintRequested(
-        uint256 mintId,
-        address minter,
-        uint256 mintTime,
-        uint256 refAssetPriceAtMint,
-        uint256 longInEthDeposited,
-        uint256 shortInEthDeposited,
-        uint256 daiDeposited
-    );
+    event MintRequested(uint256 mintId, address minter);
+    event DisputeMintRequested(uint256 mintId, address disputer);
+    event MintProcessed(uint256 mintId, address minter);
 
     struct SettleRequest {
         address settler;
+        address disputer;
         uint256 time;
         Status status;
     }
 
     event SettleRequested(address settler, uint256 time);
+    event DisputeSettleRequested(
+        address disputer,
+        address settler,
+        uint256 time
+    );
 
+    // TODO: Change this when not testing
     uint256 public settleRequestDisputablePeriod = 10;
-    uint256 public settleRequestEthCollateral = 1e18;
+    uint256 public settleRequestEthCollateral = 1e17;
+    uint256 public disputeSettleRequestFee = 1e17;
     SettleRequest curSettleRequest;
 
     struct Stake {
@@ -209,10 +217,6 @@ contract PricelessCFD {
     }
 
     /***********************************
-        Disputable
-    ************************************/
-
-    /***********************************
         Liquidity providers
     ************************************/
 
@@ -260,20 +264,13 @@ contract PricelessCFD {
             shortInEthDeposited: shortTokenInEth,
             daiDeposited: daiDeposited,
             processed: false,
-            status: Status.PreDispute
+            status: Status.PreDispute,
+            disputer: address(0)
         });
 
         mintRequests[curMintId] = mintRequest;
 
-        emit MintRequested(
-            curMintId,
-            msg.sender,
-            now,
-            curRefAssetPrice,
-            longTokenInEth,
-            shortTokenInEth,
-            daiDeposited
-        );
+        emit MintRequested(curMintId, msg.sender);
 
         // Bump mint request
         curMintId = curMintId + 1;
@@ -281,26 +278,112 @@ contract PricelessCFD {
         return curMintId - 1;
     }
 
+    function disputeMintRequest(uint256 mintId)
+        public
+        payable
+        notInSettlementPeriod
+    {
+        MintRequest storage mintRequest = mintRequests[mintId];
+
+        require(msg.value >= disputeMintRequestFee, "Lacking fee to dispute!");
+
+        require(
+            mintRequest.processed == false,
+            "Mint request has been processed!"
+        );
+        require(
+            mintRequest.status == Status.PreDispute,
+            "Mint request is already in dispute!"
+        );
+
+        // Refund access fee
+        if (msg.value > disputeMintRequestFee) {
+            msg.sender.call.value(msg.value.sub(disputeMintRequestFee))("");
+        }
+
+        // Set dispute status
+        mintRequest.disputer = msg.sender;
+        mintRequest.status = Status.PendingDispute;
+
+        // Request price from Oracle
+        oracle.requestPrice(identifier, mintRequest.mintTime);
+
+        emit DisputeMintRequested(mintId, msg.sender);
+    }
+
     function processMintRequest(uint256 mintId) public notInSettlementPeriod {
-        MintRequest memory mintRequest = mintRequests[mintId];
+        MintRequest storage mintRequest = mintRequests[mintId];
 
         // Make sure only mintRequest hasn't been processed yet
         require(
             mintRequest.processed == false,
             "Mint request has been processed!"
         );
+
+        // Make sure only mintRequest is at the very least initialized
         require(
-            mintRequest.status == Status.PreDispute ||
-                mintRequest.status == Status.DisputeFailed,
-            "Mint request is in dispute!"
+            mintRequest.status != Status.Uninitialized,
+            "Mint request has not been initialized!"
         );
 
-        // TODO: Remove below when not testing
-        // require(
-        //     mintRequest.mintTime.add(mintRequestDisputablePeriod) <= now,
-        //     "Mint request still in disputable period!"
-        // );
+        // If the mint request is predisputed, make sure the mint request is "mature" enough
+        if (mintRequest.status == Status.PreDispute) {
+            require(
+                mintRequest.mintTime.add(mintRequestDisputablePeriod) <= now,
+                "Mint request still in disputable period!"
+            );
+        }
 
+        // If the mint request is still pending dispute,
+        // Check the oracle price, and update it if necessary
+        if (mintRequest.status == Status.PendingDispute) {
+            if (oracle.hasPrice(identifier, mintRequest.mintTime)) {
+                uint256 oraclePrice = uint256(
+                    oracle.getPrice(identifier, mintRequest.mintTime)
+                );
+
+                // If oracle price == mint price requested
+                // Then its valid, send dispute fees back to minter
+
+                // TODO: Maybe give it some lee-way?
+                if (mintRequest.refAssetPriceAtMint == oraclePrice) {
+                    mintRequest.status = Status.DisputeFailed;
+                    mintRequest.minter.call.value(disputeMintRequestFee)("");
+                } else {
+                    mintRequest.status = Status.DisputeSucceeded;
+
+                    // Minter loses their funds to disputer
+                    // TODO: In future disputer has to put up
+                    //       a proportional amount of collateral
+                    mintRequest.disputer.call.value(
+                        mintRequest.longInEthDeposited.add(
+                            mintRequest.shortInEthDeposited
+                        )
+                    );
+
+                    require(
+                        daiToken.transferFrom(
+                            address(this),
+                            mintRequest.disputer,
+                            mintRequest.daiDeposited
+                        ),
+                        "Transfer DAI for requestMint failed"
+                    );
+                }
+            }
+        }
+
+        // If we have reached it so far, it means that its a valid mint request
+        if (
+            mintRequest.status == Status.PreDispute ||
+            mintRequest.status == Status.DisputeFailed
+        ) {
+            _processMintRequestSuccess(mintId);
+        }
+    }
+
+    function _processMintRequestSuccess(uint256 mintId) internal {
+        MintRequest storage mintRequest = mintRequests[mintId];
 
         // 1. Mint the long/short tokens for the synthetic asset
         uint256 daiDepositedHalf = mintRequest.daiDeposited.div(2);
@@ -322,14 +405,18 @@ contract PricelessCFD {
             .add(mintRequest.shortInEthDeposited);
 
         // 4. Save to staker's profile
-        stakes[msg.sender] = Stake({
-            longLP: stakes[msg.sender].longLP.add(longLP),
-            shortLP: stakes[msg.sender].shortLP.add(shortLP),
-            mintVolumeInDai: stakes[msg.sender].mintVolumeInDai.add(
+        stakes[mintRequest.minter] = Stake({
+            longLP: stakes[mintRequest.minter].longLP.add(longLP),
+            shortLP: stakes[mintRequest.minter].shortLP.add(shortLP),
+            mintVolumeInDai: stakes[mintRequest.minter].mintVolumeInDai.add(
                 mintRequest.daiDeposited
             ),
             liquidated: false
         });
+
+        // 5. Mark mint request as processed and emit event
+        mintRequest.processed = true;
+        emit MintProcessed(mintId, mintRequest.minter);
 
         // TODO: Convert DAI into cDAI/aDAI or some interest bearing token
     }
@@ -359,26 +446,94 @@ contract PricelessCFD {
         emit SettleRequested(msg.sender, now);
     }
 
+    function disputeSettleRequest() public payable notInSettlementPeriod {
+        require(
+            curSettleRequest.status == Status.PreDispute,
+            "Settle request needs to be in PreDispute!"
+        );
+        require(
+            msg.value >= disputeSettleRequestFee,
+            "Missing dispute settle request fee!"
+        );
+
+        // Refund access fee
+        if (msg.value > disputeSettleRequestFee) {
+            msg.sender.call.value(msg.value.sub(disputeSettleRequestFee))("");
+        }
+
+        curSettleRequest.status = Status.PendingDispute;
+        curSettleRequest.disputer = msg.sender;
+
+        emit DisputeSettleRequested(
+            msg.sender,
+            curSettleRequest.settler,
+            curSettleRequest.time
+        );
+    }
+
     function processSettleRequest() public notInSettlementPeriod {
-        // A request to settle is sent
+        // Settle request is at the very least initialized
         require(
-            curSettleRequest.time.add(settleRequestDisputablePeriod) >= now,
-            "Settlement request is disputable"
-        );
-        require(
-            curSettleRequest.status == Status.PreDispute ||
-                curSettleRequest.status == Status.DisputeFailed,
-            "Settle request not initialized"
+            curSettleRequest.status != Status.Uninitialized,
+            "Settle request has not been initialized!"
         );
 
-        // Pay back collateral to settler
-        msg.sender.call.value(settleRequestEthCollateral)("");
+        // If the settle request is predisputed, make sure the mint request is "mature" enough
+        if (curSettleRequest.status == Status.PreDispute) {
+            require(
+                curSettleRequest.time.add(settleRequestDisputablePeriod) <= now,
+                "Settle request still in disputable period!"
+            );
+        }
 
-        // TODO: Payout interest to settler via cDAI
+        if (curSettleRequest.status == Status.PendingDispute) {
+            if (oracle.hasPrice(identifier, curSettleRequest.time)) {
+                uint256 oraclePrice = uint256(
+                    oracle.getPrice(identifier, curSettleRequest.time)
+                );
 
-        inSettlementPeriod = true;
+                bool priceIsPositive = oraclePrice > refAssetOpeningPrice;
 
-        emit SettleRequested(msg.sender, now);
+                uint256 delta = priceIsPositive
+                    ? oraclePrice.sub(refAssetOpeningPrice)
+                    : refAssetOpeningPrice.sub(oraclePrice);
+
+                // Valid settlement, settler gets collateral from disputer
+                if (delta > refAssetPriceMaxDelta) {
+                    curSettleRequest.status = Status.DisputeFailed;
+                    curSettleRequest.settler.call.value(
+                        disputeSettleRequestFee
+                    )("");
+                } else {
+                    // Invalid settlement, disputer get collateral from settler
+                    curSettleRequest.disputer.call.value(
+                        settleRequestEthCollateral
+                    )("");
+
+                    // Reinitialize dispute
+                    curSettleRequest.status = Status.Uninitialized;
+                    curSettleRequest.disputer = address(0);
+                    curSettleRequest.settler = address(0);
+                    curSettleRequest.time = 0;
+                }
+            }
+        }
+
+        // If we've reached here after all the checks, it means that
+        // the settlement is valid
+        if (
+            curSettleRequest.status == Status.DisputeFailed ||
+            curSettleRequest.status == Status.PreDispute
+        ) {
+            // TODO: Have a reward to settler (probably via DAI interest)
+
+            curSettleRequest.settler.call.value(settleRequestEthCollateral)("");
+            inSettlementPeriod = true;
+            emit SettleRequested(
+                curSettleRequest.settler,
+                curSettleRequest.time
+            );
+        }
     }
 
     function getETHCollateralRequirements(
@@ -424,14 +579,14 @@ contract PricelessCFD {
             ? curRefAssetPrice.sub(refAssetOpeningPrice)
             : refAssetOpeningPrice.sub(curRefAssetPrice);
 
-        uint256 deltaWithLeverage = delta.mulTruncate(leverage);
-
-        if (deltaWithLeverage > refAssetPriceMaxDelta) {
+        if (delta > refAssetPriceMaxDelta) {
             // Users will have chance to dispute it
             revert(
-                "Asset price has exceeded bounds, please settleContract instead"
+                "Asset price has exceeded bounds, please call requestSettle instead"
             );
         }
+
+        uint256 deltaWithLeverage = delta.mulTruncate(leverage);
 
         uint256 winRate = refAssetOpeningPrice.add(deltaWithLeverage);
         uint256 loseRate = refAssetOpeningPrice.sub(deltaWithLeverage);

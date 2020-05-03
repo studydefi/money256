@@ -1,5 +1,6 @@
 const { ethers } = require('ethers')
-const MockOracle = artifacts.require("MockOracle")
+const MockOracle = artifacts.require("MockOracle");
+const IdentifierWhitelist = artifacts.require("IdentifierWhitelist")
 const Finder = artifacts.require('Finder');
 const Timer = artifacts.require('Timer');
 const PricelessCFD = artifacts.require("PricelessCFD");
@@ -10,6 +11,8 @@ module.exports = async (deployer) => {
 
   await deployer.deploy(MockOracle, Finder.address, Timer.address)
 
+  await deployer.deploy(IdentifierWhitelist)
+
   await deployer.deploy(
     PricelessCFD,
     ethers.utils.parseEther("5"), // Leverage
@@ -18,7 +21,6 @@ module.exports = async (deployer) => {
     ethers.utils.parseEther("1"), // Arbitrary price of asset we're tracking
     ethers.utils.parseEther("0.2"), // Ceil is 1.2 and bottom is 0.8
     600, // 10 minute window before mint request gets mined
-    MockOracle.address,
-    { gas: 6000000 }
+    MockOracle.address
   );
 };
