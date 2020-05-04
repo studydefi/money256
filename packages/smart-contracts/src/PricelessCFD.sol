@@ -37,11 +37,11 @@ contract PricelessCFD {
     Token public longToken;
     Token public shortToken;
 
-    IBFactory bFactory = IBFactory(0x9424B1412450D0f8Fc2255FAf6046b98213B76Bd);
-    IBPool bPool;
-    IERC20 daiToken = IERC20(0x6B175474E89094C44Da98b954EedeAC495271d0F);
+    IBFactory public bFactory = IBFactory(0x9424B1412450D0f8Fc2255FAf6046b98213B76Bd);
+    IBPool public bPool;
+    IERC20 public daiToken = IERC20(0x6B175474E89094C44Da98b954EedeAC495271d0F);
 
-    OracleInterface oracle;
+    OracleInterface public oracle;
 
     /***********************************
         CFD Parameters

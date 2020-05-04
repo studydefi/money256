@@ -185,6 +185,8 @@ describe("PricessCFD", () => {
     // Make sure our stakes increased after minting
     const stakeAfter = await pricelessCFDContract.stakes(minterWallet1.address);
 
+    console.log(stakeAfter)
+
     expect(stakeAfter.longTokens.gt(stakeBefore.longTokens)).toBe(true);
     expect(stakeAfter.shortTokens.gt(stakeBefore.shortTokens)).toBe(true);
   });
@@ -255,5 +257,74 @@ describe("PricessCFD", () => {
 
     expect(stakeAfter.longTokens.gt(stakeBefore.longTokens)).toBe(true);
     expect(stakeAfter.shortTokens.gt(stakeBefore.shortTokens)).toBe(true);
+  });
+
+  test("requestMint, dispute(success) and processMintId (minterWallet3)", async () => {
+    // The asset's price is initialized at 1 DAI,
+    // with leverage of 5,
+    // window of 600 seconds
+
+    // curRefAssetPrice is at 1.01 DAI
+    await getDaiFromUniswap(minterWallet3);
+
+    // As such, buying a longToken will be 1.05 DAI
+    //          buying a shortToken will be 0.95 DAI
+
+    // We want to deposit in 100 DAI and ETH equilavent
+    // (Note the excess ETH will be redunded)
+    const daiDeposited = ethers.utils.parseEther("100.0");
+    const curInvalidRefAssetPrice = ethers.utils.parseEther("1.01");
+    const curValidRefAssetPrice = ethers.utils.parseEther("1.03");
+    const expiration = getCurEpoch() + 120; // 2 mins in the future
+
+    // Approve contract to get funds from contract
+    await daiContract
+      .connect(minterWallet3)
+      .approve(pricelessCFDContract.address, daiDeposited);
+
+    // Request Mint Tx
+    const reqMintTx = await pricelessCFDContract
+      .connect(minterWallet3)
+      .requestMint(expiration, curInvalidRefAssetPrice, daiDeposited, {
+        value: ethers.utils.parseEther("1.0"),
+        gasLimit: 6000000,
+      });
+
+    const reqMintTxRecp = await reqMintTx.wait();
+    const reqMintEvent = reqMintTxRecp.events[1];
+    const mintId = reqMintEvent.args.mintId;
+    const mintRequest = await pricelessCFDContract.mintRequests(mintId);
+
+    // Dispute mint request
+    const disputeMintRequestFee = await pricelessCFDContract.disputeMintRequestFee();
+    await pricelessCFDContract
+      .connect(disputerWallet)
+      .disputeMintRequest(mintId, {
+        value: disputeMintRequestFee,
+        gasLimit: 6000000,
+      });
+
+    // Oracle set price to be valid with mintRequester
+    const identifier = await pricelessCFDContract.identifier();
+    await mockOracleContract
+      .connect(deployerWallet)
+      .pushPrice(identifier, mintRequest.mintTime, curValidRefAssetPrice);
+
+    // Stakes before
+    const stakeBefore = await pricelessCFDContract.stakes(
+      minterWallet3.address
+    );
+
+    // Process mint request
+    const tx = await pricelessCFDContract
+      .connect(minterWallet3)
+      .processMintRequest(mintId, { gasLimit: 6000000 });
+    await tx.wait();
+
+    // Make sure our stakes increased after minting
+    const stakeAfter = await pricelessCFDContract.stakes(minterWallet3.address);
+
+    expect(stakeAfter.longTokens.eq(stakeBefore.longTokens)).toBe(true);
+    expect(stakeAfter.shortTokens.eq(stakeBefore.shortTokens)).toBe(true);
   });
 });
