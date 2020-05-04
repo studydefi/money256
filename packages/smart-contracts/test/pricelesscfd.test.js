@@ -96,7 +96,7 @@ const getDaiFromUniswap = async (wallet) => {
   const futureEpoch = getCurEpoch() + 3600;
 
   const tx = await uniswapDaiExchange.ethToTokenSwapInput(1, futureEpoch, {
-    gasLimit: 1500000,
+    gasLimit: 1500000, 
     value: ethers.utils.parseEther("5"),
   });
 
@@ -104,13 +104,25 @@ const getDaiFromUniswap = async (wallet) => {
 };
 
 beforeAll(async () => {
+  // Get DAI
+  await getDaiFromUniswap(deployerWallet);
+  await daiContract
+    .connect(deployerWallet)
+    .transfer(pricelessCFDContract.address, "2000000");
+
+  // Initialize Pool (need 2000000 WEI DAI)
+  await pricelessCFDContract
+    .connect(deployerWallet)
+    .initPool({ gasLimit: 7000000 });
+
+  // Need to initialize pool first
   const identifier = await pricelessCFDContract.identifier();
 
   await identifierWhitelistContract
     .connect(deployerWallet)
     .addSupportedIdentifier(identifier);
 
-    await finderContract
+  await finderContract
     .connect(deployerWallet)
     .changeImplementationAddress(
       ethers.utils.formatBytes32String("IdentifierWhitelist"),
@@ -127,7 +139,6 @@ beforeAll(async () => {
 
 describe("PricessCFD", () => {
   test("requestMint and processMintId (minterWallet1)", async () => {
-    return;
     // The asset's price is initialized at 1 DAI,
     // with leverage of 5,
     // window of 600 seconds
@@ -161,7 +172,9 @@ describe("PricessCFD", () => {
     const mintId = reqMintEvent.args.mintId;
 
     // Stakes before
-    const stakeBefore = await pricelessCFDContract.stakes(minterWallet1.address);
+    const stakeBefore = await pricelessCFDContract.stakes(
+      minterWallet1.address
+    );
 
     // Process mint request
     const tx = await pricelessCFDContract
@@ -172,9 +185,8 @@ describe("PricessCFD", () => {
     // Make sure our stakes increased after minting
     const stakeAfter = await pricelessCFDContract.stakes(minterWallet1.address);
 
-    expect(stakeAfter.longLP.gt(stakeBefore.longLP)).toBe(true);
-    expect(stakeAfter.shortLP.gt(stakeBefore.shortLP)).toBe(true);
-    expect(stakeAfter.mintVolumeInDai.gt(stakeBefore.mintVolumeInDai)).toBe(true);
+    expect(stakeAfter.longTokens.gt(stakeBefore.longTokens)).toBe(true);
+    expect(stakeAfter.shortTokens.gt(stakeBefore.shortTokens)).toBe(true);
   });
 
   test("requestMint, dispute(fail) and processMintId (minterWallet2)", async () => {
@@ -204,6 +216,7 @@ describe("PricessCFD", () => {
       .connect(minterWallet2)
       .requestMint(expiration, curRefAssetPrice, daiDeposited, {
         value: ethers.utils.parseEther("1.0"),
+        gasLimit: 6000000,
       });
 
     const reqMintTxRecp = await reqMintTx.wait();
@@ -215,7 +228,10 @@ describe("PricessCFD", () => {
     const disputeMintRequestFee = await pricelessCFDContract.disputeMintRequestFee();
     await pricelessCFDContract
       .connect(disputerWallet)
-      .disputeMintRequest(mintId, { value: disputeMintRequestFee });
+      .disputeMintRequest(mintId, {
+        value: disputeMintRequestFee,
+        gasLimit: 6000000,
+      });
 
     // Oracle set price to be valid with mintRequester
     const identifier = await pricelessCFDContract.identifier();
@@ -224,19 +240,20 @@ describe("PricessCFD", () => {
       .pushPrice(identifier, mintRequest.mintTime, curRefAssetPrice);
 
     // Stakes before
-    const stakeBefore = await pricelessCFDContract.stakes(minterWallet2.address);
+    const stakeBefore = await pricelessCFDContract.stakes(
+      minterWallet2.address
+    );
 
     // Process mint request
     const tx = await pricelessCFDContract
       .connect(minterWallet2)
-      .processMintRequest(mintId);
+      .processMintRequest(mintId, { gasLimit: 6000000 });
     await tx.wait();
 
     // Make sure our stakes increased after minting
     const stakeAfter = await pricelessCFDContract.stakes(minterWallet2.address);
 
-    expect(stakeAfter.longLP.gt(stakeBefore.longLP)).toBe(true);
-    expect(stakeAfter.shortLP.gt(stakeBefore.shortLP)).toBe(true);
-    expect(stakeAfter.mintVolumeInDai.gt(stakeBefore.mintVolumeInDai)).toBe(true);
+    expect(stakeAfter.longTokens.gt(stakeBefore.longTokens)).toBe(true);
+    expect(stakeAfter.shortTokens.gt(stakeBefore.shortTokens)).toBe(true);
   });
 });

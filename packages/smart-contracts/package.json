@@ -6,7 +6,7 @@
   "author": "Kendrick Tan",
   "license": "MIT",
   "scripts": {
-    "test": "jest test/* --no-cache --testTimeout 1000000000"
+    "test": "jest test/* --runInBand --no-cache --testTimeout 1000000000"
   },
   "dependencies": {
     "@openzeppelin/contracts": "^2.5.1",

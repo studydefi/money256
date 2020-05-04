@@ -14,6 +14,8 @@ import "@studydefi/money-legos/uniswap/contracts/IUniswapExchange.sol";
 
 import "./interfaces/OracleInterface.sol";
 import "./interfaces/IMedianizer.sol";
+import "./interfaces/IBFactory.sol";
+import "./interfaces/IBPool.sol";
 
 import "./lib/StableMath.sol";
 
@@ -27,7 +29,6 @@ contract PricelessCFD {
         We will also hold a couple of assumptions, for e.g. that 1 DAI = 1 USD
         Therefore, we will be assuming that USD/Asset = DAI/Asset
     ************************************/
-
     using StableMath for uint256;
 
     /***********************************
@@ -36,20 +37,9 @@ contract PricelessCFD {
     Token public longToken;
     Token public shortToken;
 
-    IUniswapFactory uniswapFactory = IUniswapFactory(
-        0xc0a47dFe034B400B47bDaD5FecDa2621de6c4d95
-    );
-    IUniswapExchange uniswapLongTokenExchange;
-    IUniswapExchange uniswapShortTokenExchange;
-
-    IERC20 public daiToken = IERC20(0x6B175474E89094C44Da98b954EedeAC495271d0F);
-    IUniswapExchange uniswapDaiExchange = IUniswapExchange(
-        uniswapFactory.getExchange(address(daiToken))
-    );
-
-    IMedianizer usdEthPriceFeed = IMedianizer(
-        0x729D19f657BD0614b4985Cf1D82531c67569197B
-    );
+    IBFactory bFactory = IBFactory(0x9424B1412450D0f8Fc2255FAf6046b98213B76Bd);
+    IBPool bPool;
+    IERC20 daiToken = IERC20(0x6B175474E89094C44Da98b954EedeAC495271d0F);
 
     OracleInterface oracle;
 
@@ -67,7 +57,7 @@ contract PricelessCFD {
     uint256 public settlementEpoch;
     uint256 public refAssetOpeningPrice; // Price, we assume it'll be USD/Asset in every case
     uint256 public refAssetPriceMaxDelta; // How much will this contract allow them to deviate from opening price
-    uint256 public totalMintVolumeInEth;
+    uint256 public totalMintVolumeInDai;
 
     // Because we're using a priceless synthetic
     // we don't know the price of the underlying asset
@@ -100,9 +90,8 @@ contract PricelessCFD {
         address minter;
         uint256 mintTime;
         uint256 refAssetPriceAtMint;
-        uint256 longInEthDeposited; // Long token in ETH
-        uint256 shortInEthDeposited; // Short token in ETH
-        uint256 daiDeposited; // How much DAI has been deposited
+        uint256 longInDaiDeposited; // Long token in DAI
+        uint256 shortInDaiDeposited; // Short token in DAI
         bool processed; // Has the mint request been processed
         Status status; // State of the mint request
         address disputer; // Person who is disputing a liquidation
@@ -144,9 +133,8 @@ contract PricelessCFD {
     SettleRequest curSettleRequest;
 
     struct Stake {
-        uint256 longLP;
-        uint256 shortLP;
-        uint256 mintVolumeInDai;
+        uint256 longTokens;
+        uint256 shortTokens;
         bool liquidated;
     }
 
@@ -177,27 +165,47 @@ contract PricelessCFD {
 
         longToken = new Token("Long Token", "LTKN");
         shortToken = new Token("Short Token", "STKN");
+    }
 
-        // TODO: Switch to balancer?
-        uniswapFactory = IUniswapFactory(
-            0xc0a47dFe034B400B47bDaD5FecDa2621de6c4d95
-        );
-        uniswapLongTokenExchange = IUniswapExchange(
-            uniswapFactory.createExchange(address(longToken))
-        );
-        uniswapShortTokenExchange = IUniswapExchange(
-            uniswapFactory.createExchange(address(shortToken))
-        );
+    function initPool() external {
+        if (address(bPool) != address(0)) {
+            return;
+        }
 
+        // Create new pool
+        bPool = IBPool(bFactory.newBPool());
+
+        // Approve tokens
         require(
-            longToken.approve(address(uniswapLongTokenExchange), uint256(-1)),
+            daiToken.approve(address(bPool), uint256(-1)),
             "Long token approval failed"
         );
 
         require(
-            shortToken.approve(address(uniswapShortTokenExchange), uint256(-1)),
+            longToken.approve(address(bPool), uint256(-1)),
+            "Long token approval failed"
+        );
+
+        require(
+            shortToken.approve(address(bPool), uint256(-1)),
             "Short token approval failed"
         );
+
+        uint256 minBal = bPool.MIN_BALANCE();
+
+        longToken.mint(address(this), minBal);
+        shortToken.mint(address(this), minBal);
+
+        // Initialize and bind tokens to pool
+        bPool.bind(address(daiToken), minBal.mul(2), 25e18);
+
+        // Long Token
+        bPool.bind(address(longToken), minBal, 125e17);
+
+        // Short token
+        bPool.bind(address(shortToken), minBal, 125e17);
+
+        bPool.setPublicSwap(true);
     }
 
     /***********************************
@@ -245,24 +253,17 @@ contract PricelessCFD {
 
         // 2. Calculate the value of the tokens in ETH
         (
-            uint256 longTokenInEth,
-            uint256 shortTokenInEth
-        ) = getETHCollateralRequirements(daiDeposited, curRefAssetPrice);
-
-        uint256 totalEthCollateral = longTokenInEth.add(shortTokenInEth);
-        require(msg.value >= totalEthCollateral, "ETH collateral not met");
-        if (msg.value > totalEthCollateral) {
-            msg.sender.transfer(msg.value.sub(totalEthCollateral));
-        }
+            uint256 longTokenInDai,
+            uint256 shortTokenInDai
+        ) = getDaiCollateralRequirements(daiDeposited, curRefAssetPrice);
 
         // 3. Create a mint request
         MintRequest memory mintRequest = MintRequest({
             minter: msg.sender,
             mintTime: now,
             refAssetPriceAtMint: curRefAssetPrice,
-            longInEthDeposited: longTokenInEth,
-            shortInEthDeposited: shortTokenInEth,
-            daiDeposited: daiDeposited,
+            longInDaiDeposited: longTokenInDai,
+            shortInDaiDeposited: shortTokenInDai,
             processed: false,
             status: Status.PreDispute,
             disputer: address(0)
@@ -355,17 +356,13 @@ contract PricelessCFD {
                     // Minter loses their funds to disputer
                     // TODO: In future disputer has to put up
                     //       a proportional amount of collateral
-                    mintRequest.disputer.call.value(
-                        mintRequest.longInEthDeposited.add(
-                            mintRequest.shortInEthDeposited
-                        )
-                    );
-
                     require(
                         daiToken.transferFrom(
                             address(this),
                             mintRequest.disputer,
-                            mintRequest.daiDeposited
+                            mintRequest.longInDaiDeposited.add(
+                                mintRequest.shortInDaiDeposited
+                            )
                         ),
                         "Transfer DAI for requestMint failed"
                     );
@@ -385,31 +382,54 @@ contract PricelessCFD {
     function _processMintRequestSuccess(uint256 mintId) internal {
         MintRequest storage mintRequest = mintRequests[mintId];
 
+        uint256 daiDeposited = mintRequest.shortInDaiDeposited.add(
+            mintRequest.longInDaiDeposited
+        );
+
         // 1. Mint the long/short tokens for the synthetic asset
-        uint256 daiDepositedHalf = mintRequest.daiDeposited.div(2);
-        longToken.mint(address(this), daiDepositedHalf);
-        shortToken.mint(address(this), daiDepositedHalf);
+        longToken.mint(address(this), mintRequest.longInDaiDeposited);
+        shortToken.mint(address(this), mintRequest.shortInDaiDeposited);
 
-        // 2. Contribute to Uniswap
-        uint256 longLP = uniswapLongTokenExchange.addLiquidity.value(
-            mintRequest.longInEthDeposited
-        )(1, daiDepositedHalf, now.add(3600));
+        // 2. Contribute to Balancer Pool and rebind weights
+        bPool.rebind(
+            address(daiToken),
+            bPool.getBalance(address(daiToken)).add(daiDeposited),
+            25e18
+        );
 
-        uint256 shortLP = uniswapShortTokenExchange.addLiquidity.value(
-            mintRequest.shortInEthDeposited
-        )(1, daiDepositedHalf, now.add(3600));
+        uint256 longBal = bPool.getBalance(address(longToken)).add(
+            mintRequest.longInDaiDeposited
+        );
+        uint256 longDenorm = mintRequest
+            .longInDaiDeposited
+            .divPrecisely(daiDeposited)
+            .mulTruncate(25e18);
+
+        uint256 shortBal = bPool.getBalance(address(shortToken)).add(
+            mintRequest.shortInDaiDeposited
+        );
+        uint256 shortDenorm = mintRequest
+            .shortInDaiDeposited
+            .divPrecisely(daiDeposited)
+            .mulTruncate(25e18);
+
+        // Needs to reset denorm value otherwise a `ERR_MAX_TOTAL_WEIGHT` will be thrown
+        bPool.rebind(address(longToken), longBal, 1e18);
+        bPool.rebind(address(shortToken), shortBal, 1e18);
+
+        bPool.rebind(address(longToken), longBal, longDenorm);
+        bPool.rebind(address(shortToken), shortBal, shortDenorm);
 
         // 3. Save total mint volume in ETH
-        totalMintVolumeInEth = totalMintVolumeInEth
-            .add(mintRequest.longInEthDeposited)
-            .add(mintRequest.shortInEthDeposited);
+        totalMintVolumeInDai = totalMintVolumeInDai.add(daiDeposited);
 
         // 4. Save to staker's profile
         stakes[mintRequest.minter] = Stake({
-            longLP: stakes[mintRequest.minter].longLP.add(longLP),
-            shortLP: stakes[mintRequest.minter].shortLP.add(shortLP),
-            mintVolumeInDai: stakes[mintRequest.minter].mintVolumeInDai.add(
-                mintRequest.daiDeposited
+            longTokens: stakes[mintRequest.minter].longTokens.add(
+                mintRequest.longInDaiDeposited
+            ),
+            shortTokens: stakes[mintRequest.minter].shortTokens.add(
+                mintRequest.shortInDaiDeposited
             ),
             liquidated: false
         });
@@ -417,8 +437,6 @@ contract PricelessCFD {
         // 5. Mark mint request as processed and emit event
         mintRequest.processed = true;
         emit MintProcessed(mintId, mintRequest.minter);
-
-        // TODO: Convert DAI into cDAI/aDAI or some interest bearing token
     }
 
     function requestSettle() public payable notInSettlementPeriod {
@@ -536,38 +554,25 @@ contract PricelessCFD {
         }
     }
 
-    function getETHCollateralRequirements(
+    function getDaiCollateralRequirements(
         uint256 daiDeposited,
         uint256 curRefAssetPrice
     ) public view returns (uint256, uint256) {
-        // Individual deposits
-        uint256 individualDeposits = daiDeposited.div(2);
-
         // Get (leverage) rates for long/short token, according to the
         // supplied reference price
-        (uint256 longRate, uint256 shortRate) = getLongShortRates(
-            curRefAssetPrice
-        );
+        (
+            uint256 longRatePercentage,
+            uint256 shortRatePercentage
+        ) = getLongShortRates(curRefAssetPrice);
 
-        uint256 totalLongDaiValue = longRate.mulTruncate(individualDeposits);
-        uint256 totalShortDaiValue = shortRate.mulTruncate(individualDeposits);
-
-        // Rate is USD/Asset or DAI/Asset
-        // Assume 1 DAI = 1 USD
-        // Get current DAI per ETH
-        uint256 daiPerEthSimple = uniswapDaiExchange.getEthToTokenInputPrice(
-            1e6
-        );
-        uint256 daiPerEthExact = daiPerEthSimple.mul(1e12);
-
-        // Get ETH per Asset
+        // Get DAI per Asset
         return (
-            totalLongDaiValue.divPrecisely(daiPerEthExact),
-            totalShortDaiValue.divPrecisely(daiPerEthExact)
+            longRatePercentage.mulTruncate(daiDeposited),
+            shortRatePercentage.mulTruncate(daiDeposited)
         );
     }
 
-    // What are the current exchange rates for long/short token rates
+    // What are the current exchange rates for long/short token rates (in %)
     function getLongShortRates(uint256 curRefAssetPrice)
         public
         view
@@ -591,10 +596,15 @@ contract PricelessCFD {
         uint256 winRate = refAssetOpeningPrice.add(deltaWithLeverage);
         uint256 loseRate = refAssetOpeningPrice.sub(deltaWithLeverage);
 
+        uint256 rate = winRate.add(loseRate);
+
+        uint256 winRatePercentage = winRate.divPrecisely(rate);
+        uint256 loseRatePercentage = loseRate.divPrecisely(rate);
+
         if (priceIsPositive) {
-            return (winRate, loseRate);
+            return (winRatePercentage, loseRatePercentage);
         } else {
-            return (loseRate, winRate);
+            return (loseRatePercentage, winRatePercentage);
         }
     }
 }
