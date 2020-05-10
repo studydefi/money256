@@ -252,6 +252,8 @@ describe("PricessCFD", () => {
       .requestSettle(ceilPrice, { value: settleRequestEthCollateral });
     await reqSettleTx.wait();
 
+    await sleep(10000);
+
     // Process settlement
     const processSettleReqTx = await pricelessCFDContract
       .connect(genericWallet1)
@@ -276,9 +278,6 @@ describe("PricessCFD", () => {
 
     // Get daiBalance
     const finalDaiBalance = await daiContract.balanceOf(genericWallet1.address);
-
-    console.log(initialDaiBal)
-    console.log(finalDaiBalance)
 
     expect(initialDaiBal.eq(finalDaiBalance)).toBe(true);
   });

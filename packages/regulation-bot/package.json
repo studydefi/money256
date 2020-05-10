@@ -1,0 +1,12 @@
+{
+  "name": "money256-regulation-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "license": "MIT",
+  "dependencies": {
+    "@studydefi/money-legos": "^2.1.0",
+    "bluebird": "^3.7.2",
+    "ethers": "^4.0.47",
+    "money256-smart-contracts": "^0.0.1"
+  }
+}
