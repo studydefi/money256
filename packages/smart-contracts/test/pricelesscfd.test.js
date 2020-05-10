@@ -38,7 +38,7 @@ const minterWallet2 = new ethers.Wallet(
   provider
 );
 
-const minterWallet3 = new ethers.Wallet(
+const genericWallet1 = new ethers.Wallet(
   "0x829e924fdf021ba3dbbc4225edfece9aca04b929d6e75613329ca6f1d31c0bb4",
   provider
 );
@@ -214,5 +214,28 @@ describe("PricessCFD", () => {
     );
 
     expect(initialDaiBalContract.eq(postRedeemDaiBalContract)).toBe(true);
+  });
+
+  test("request settlement (no dispute)", async () => {
+    // Settlement can only happen if the price of the underlying
+    // exceeds the bounds
+    const openingPrice = await pricelessCFDContract.refAssetOpeningPrice();
+    const maxDelta = await pricelessCFDContract.refAssetPriceMaxDelta();
+    const ceilPrice = openingPrice.add(maxDelta);
+
+    // Calculate ETH collateral requirements
+    const settleRequestEthCollateral = await pricelessCFDContract.settleRequestEthCollateral();
+
+    // Requests for a settlement
+    const reqSettleTx = await pricelessCFDContract
+      .connect(genericWallet1)
+      .requestSettle(ceilPrice, { value: settleRequestEthCollateral });
+    await reqSettleTx.wait();
+
+    // Process settlement
+    const processSettleReqTx = await pricelessCFDContract
+      .connect(genericWallet1)
+      .processSettleRequest();
+    await processSettleReqTx.wait()
   });
 });

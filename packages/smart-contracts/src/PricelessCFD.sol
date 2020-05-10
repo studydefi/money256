@@ -9,9 +9,6 @@ pragma solidity ^0.5.16;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import "@studydefi/money-legos/uniswap/contracts/IUniswapFactory.sol";
-import "@studydefi/money-legos/uniswap/contracts/IUniswapExchange.sol";
-
 import "./interfaces/OracleInterface.sol";
 import "./interfaces/IMedianizer.sol";
 import "./interfaces/IBFactory.sol";
@@ -53,24 +50,10 @@ contract PricelessCFD {
     // Everything is in 18 units of wei
     // i.e. x2 leverage is 2e18
     //      100% fee is 1e18, 0.5% fee is 3e15
-    uint256 public curMintId;
     uint256 public leverage;
-    uint256 public feeRate;
     uint256 public settlementEpoch;
     uint256 public refAssetOpeningPrice; // Price, we assume it'll be USD/Asset in every case
     uint256 public refAssetPriceMaxDelta; // How much will this contract allow them to deviate from opening price
-    uint256 public totalMintVolumeInDai;
-
-    // Because we're using a priceless synthetic
-    // we don't know the price of the underlying asset
-    // when the user mints it. As such, we're
-    // relying on the user to submit honest data
-    // which can be disputed. Should the user be disputed
-    // then they lose _all_ their deposited collateral.
-    // The window is max delta between now and when
-    // the option to `mint` expires
-    // Should be 10 mins by default
-    uint256 public window;
 
     bool public inSettlementPeriod = false;
 
@@ -94,50 +77,43 @@ contract PricelessCFD {
         address settler;
         address disputer;
         uint256 time;
+        uint256 settlementPrice;
         Status status;
     }
 
-    event SettleRequested(address settler, uint256 time);
+    event SettleRequested(
+        address settler,
+        uint256 time,
+        uint256 settlementPrice
+    );
+
     event DisputeSettleRequested(
         address disputer,
         address settler,
         uint256 time
     );
 
-    // TODO: Change this when not testing
-    uint256 public settleRequestDisputablePeriod = 10;
+    // TODO: Change this to like 3 hours when not testing
+    uint256 public settleRequestDisputablePeriod = 0;
     uint256 public settleRequestEthCollateral = 1e17;
-    uint256 public disputeSettleRequestFee = 1e17;
+    uint256 public disputeSettleRequestEthCollateral = 1e17;
     SettleRequest curSettleRequest;
-
-    struct Stake {
-        uint256 longTokens;
-        uint256 shortTokens;
-        bool liquidated;
-    }
-
-    mapping(address => Stake) public stakes;
 
     /***********************************
         Constructor
     ************************************/
     constructor(
         uint256 _leverage,
-        uint256 _feeRate,
         uint256 _settlementEpoch,
         uint256 _refAssetOpeningPrice,
         uint256 _refAssetPriceMaxDelta,
-        uint256 _window,
         address _oracle
     ) public {
         leverage = _leverage;
-        feeRate = _feeRate;
         settlementEpoch = _settlementEpoch;
 
         refAssetOpeningPrice = _refAssetOpeningPrice;
         refAssetPriceMaxDelta = _refAssetPriceMaxDelta;
-
-        window = _window;
 
         oracle = OracleInterface(_oracle);
 
@@ -177,22 +153,19 @@ contract PricelessCFD {
         // Initialize and bind tokens to pool
         bPool.bind(address(daiToken), minBal.mul(2), 25e18);
 
-        // Long Token
+        // Long Token (50%)
         bPool.bind(address(longToken), minBal, 125e17);
 
-        // Short token
+        // Short token (50%)
         bPool.bind(address(shortToken), minBal, 125e17);
 
-        bPool.setPublicSwap(true);
+        bPool.finalize();
     }
 
     /***********************************
         Modifiers
     ************************************/
     modifier notInSettlementPeriod() {
-        if (now > settlementEpoch) {
-            inSettlementPeriod = true;
-        }
         require(!inSettlementPeriod, "Must not be in settlement period");
         _;
     }
@@ -231,6 +204,8 @@ contract PricelessCFD {
         // 3. Mint tokens to user
         longToken.mint(address(msg.sender), tokensToMint);
         shortToken.mint(address(msg.sender), tokensToMint);
+
+        emit Minted(tokensToMint);
     }
 
     // Redeems tokens
@@ -251,8 +226,65 @@ contract PricelessCFD {
         require(daiToken.transfer(msg.sender, daiToRefund), "Redeem failed");
     }
 
-    function requestSettle() public payable notInSettlementPeriod {
+    // Redeems remaining tokens
+    function redeemFinal() public onlyInSettlementPeriod {
+        uint256 longTokenAmount = longToken.balanceOf(msg.sender);
+        uint256 shortTokenAmount = shortToken.balanceOf(msg.sender);
+
+        // Burn tokens
+        longToken.burnFrom(msg.sender, longTokenAmount);
+        shortToken.burnFrom(msg.sender, shortTokenAmount);
+
+        // Calculate how much DAI to refund to user
+        uint256 deltaLeveraged;
+        uint256 longTokenRate;
+        uint256 shortTokenRate;
+
+        // If the token has appreciated in value, long token is worth more
+        if (curSettleRequest.settlementPrice > refAssetOpeningPrice) {
+            deltaLeveraged = curSettleRequest
+                .settlementPrice
+                .sub(refAssetOpeningPrice)
+                .mulTruncate(leverage);
+
+            longTokenRate = refAssetOpeningPrice.add(deltaLeveraged);
+            shortTokenRate = refAssetOpeningPrice.sub(deltaLeveraged);
+        } else {
+            // Else short token has appreciated in value
+            deltaLeveraged = refAssetOpeningPrice
+                .sub(curSettleRequest.settlementPrice)
+                .mulTruncate(leverage);
+
+            longTokenRate = refAssetOpeningPrice.sub(deltaLeveraged);
+            shortTokenRate = refAssetOpeningPrice.add(deltaLeveraged);
+        }
+
+        // Convert to DAI
+        uint256 longDai = longTokenRate.mulTruncate(longTokenAmount);
+        uint256 shortDai = shortTokenRate.mulTruncate(shortTokenAmount);
+        uint256 totalDaiPayout = longDai.add(shortDai);
+
+        daiToken.transfer(msg.sender, totalDaiPayout);
+    }
+
+    function requestSettle(uint256 settlementPrice)
+        public
+        payable
+        notInSettlementPeriod
+    {
         // A request to settle is sent
+        uint256 floorPrice = refAssetOpeningPrice.sub(refAssetPriceMaxDelta);
+        uint256 ceilPrice = refAssetOpeningPrice.add(refAssetPriceMaxDelta);
+
+        // If contract hasn't expired, and a settlement request is requested
+        // then it needs to exceed the bounds
+        if (now <= settlementEpoch) {
+            require(
+                settlementPrice == floorPrice || settlementPrice == ceilPrice,
+                "Not valid settlement price"
+            );
+        }
+
         require(
             curSettleRequest.status == Status.Uninitialized,
             "There is a pending settle request"
@@ -272,8 +304,9 @@ contract PricelessCFD {
         curSettleRequest.settler = msg.sender;
         curSettleRequest.time = now;
         curSettleRequest.status = Status.PreDispute;
+        curSettleRequest.settlementPrice = settlementPrice;
 
-        emit SettleRequested(msg.sender, now);
+        emit SettleRequested(msg.sender, now, settlementPrice);
     }
 
     function disputeSettleRequest() public payable notInSettlementPeriod {
@@ -282,13 +315,15 @@ contract PricelessCFD {
             "Settle request needs to be in PreDispute!"
         );
         require(
-            msg.value >= disputeSettleRequestFee,
+            msg.value >= disputeSettleRequestEthCollateral,
             "Missing dispute settle request fee!"
         );
 
         // Refund access fee
-        if (msg.value > disputeSettleRequestFee) {
-            msg.sender.call.value(msg.value.sub(disputeSettleRequestFee))("");
+        if (msg.value > disputeSettleRequestEthCollateral) {
+            msg.sender.call.value(
+                msg.value.sub(disputeSettleRequestEthCollateral)
+            )("");
         }
 
         curSettleRequest.status = Status.PendingDispute;
@@ -332,7 +367,7 @@ contract PricelessCFD {
                 if (delta > refAssetPriceMaxDelta) {
                     curSettleRequest.status = Status.DisputeFailed;
                     curSettleRequest.settler.call.value(
-                        disputeSettleRequestFee
+                        disputeSettleRequestEthCollateral
                     )("");
                 } else {
                     // Invalid settlement, disputer get collateral from settler
@@ -355,13 +390,12 @@ contract PricelessCFD {
             curSettleRequest.status == Status.DisputeFailed ||
             curSettleRequest.status == Status.PreDispute
         ) {
-            // TODO: Have a reward to settler (probably via DAI interest)
-
             curSettleRequest.settler.call.value(settleRequestEthCollateral)("");
             inSettlementPeriod = true;
             emit SettleRequested(
                 curSettleRequest.settler,
-                curSettleRequest.time
+                curSettleRequest.time,
+                curSettleRequest.settlementPrice
             );
         }
     }
