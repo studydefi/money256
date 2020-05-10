@@ -217,6 +217,26 @@ describe("PricessCFD", () => {
   });
 
   test("request settlement (no dispute)", async () => {
+    // Get me some DAI
+    await getDaiFromUniswap(genericWallet1);
+
+    // Contract daiBalance
+    const initialDaiBal = await daiContract.balanceOf(genericWallet1.address);
+
+    // Mint some tokens
+    // Mints 1 long and 1 short token
+    const daiDeposited = ethers.utils.parseEther("150.0");
+
+    await daiContract
+      .connect(genericWallet1)
+      .approve(pricelessCFDContract.address, daiDeposited);
+
+    const reqMintTx = await pricelessCFDContract
+      .connect(genericWallet1)
+      .mint(daiDeposited);
+
+    await reqMintTx.wait();
+
     // Settlement can only happen if the price of the underlying
     // exceeds the bounds
     const openingPrice = await pricelessCFDContract.refAssetOpeningPrice();
@@ -236,6 +256,30 @@ describe("PricessCFD", () => {
     const processSettleReqTx = await pricelessCFDContract
       .connect(genericWallet1)
       .processSettleRequest();
-    await processSettleReqTx.wait()
+    await processSettleReqTx.wait();
+
+    // Redeem final
+    await longTokenContract
+      .connect(genericWallet1)
+      .approve(
+        pricelessCFDContract.address,
+        await longTokenContract.balanceOf(genericWallet1.address)
+      );
+    await shortTokenContract
+      .connect(genericWallet1)
+      .approve(
+        pricelessCFDContract.address,
+        await shortTokenContract.balanceOf(genericWallet1.address)
+      );
+
+    await pricelessCFDContract.connect(genericWallet1).redeemFinal();
+
+    // Get daiBalance
+    const finalDaiBalance = await daiContract.balanceOf(genericWallet1.address);
+
+    console.log(initialDaiBal)
+    console.log(finalDaiBalance)
+
+    expect(initialDaiBal.eq(finalDaiBalance)).toBe(true);
   });
 });
