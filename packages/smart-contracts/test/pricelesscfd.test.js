@@ -67,11 +67,13 @@ const identifierWhitelistContract = new ethers.Contract(
   provider
 );
 
-const daiContract = new ethers.Contract(
-  legos.erc20.dai.address,
-  legos.erc20.dai.abi,
-  provider
-);
+const newERC20Contract = (x) =>
+  new ethers.Contract(x, legos.erc20.dai.abi, provider);
+
+const daiContract = newERC20Contract(legos.erc20.dai.address);
+
+let longTokenContract;
+let shortTokenContract;
 
 const getCurEpoch = () => parseInt(Date.now() / 1000);
 
@@ -96,7 +98,7 @@ const getDaiFromUniswap = async (wallet) => {
   const futureEpoch = getCurEpoch() + 3600;
 
   const tx = await uniswapDaiExchange.ethToTokenSwapInput(1, futureEpoch, {
-    gasLimit: 1500000, 
+    gasLimit: 1500000,
     value: ethers.utils.parseEther("5"),
   });
 
@@ -135,196 +137,82 @@ beforeAll(async () => {
       ethers.utils.formatBytes32String("Oracle"),
       mockOracleContract.address
     );
+
+  longTokenContract = newERC20Contract(await pricelessCFDContract.longToken());
+  shortTokenContract = newERC20Contract(
+    await pricelessCFDContract.shortToken()
+  );
 });
 
 describe("PricessCFD", () => {
-  test("requestMint and processMintId (minterWallet1)", async () => {
-    // The asset's price is initialized at 1 DAI,
-    // with leverage of 5,
-    // window of 600 seconds
-
-    // curRefAssetPrice is at 1.01 DAI
+  test("mint and redeem", async () => {
     await getDaiFromUniswap(minterWallet1);
 
-    // As such, buying a longToken will be 1.05 DAI
-    //          buying a shortToken will be 0.95 DAI
+    // Contract daiBalance
+    const initialDaiBalContract = await daiContract.balanceOf(
+      pricelessCFDContract.address
+    );
 
-    // We want to deposit in 100 DAI and ETH equilavent
-    // (Note the excess ETH will be redunded)
+    // We deployed the contract at ref price of 1 DAI
+    // with max delta of 0.2
+    // Ceil = 1.2, floor = 0.8
+    // Long + Short = 2 DAI ALWAYS
     const daiDeposited = ethers.utils.parseEther("100.0");
-    const curRefAssetPrice = ethers.utils.parseEther("1.01");
-    const expiration = getCurEpoch() + 120; // 2 mins in the future
 
     // Approve contract to get funds from contract
     await daiContract
       .connect(minterWallet1)
       .approve(pricelessCFDContract.address, daiDeposited);
 
-    // Request Mint Tx
-    const reqMintTx = await pricelessCFDContract
-      .connect(minterWallet1)
-      .requestMint(expiration, curRefAssetPrice, daiDeposited, {
-        value: ethers.utils.parseEther("1.0"),
-      });
-
-    const reqMintTxRecp = await reqMintTx.wait();
-    const reqMintEvent = reqMintTxRecp.events[1];
-    const mintId = reqMintEvent.args.mintId;
-
-    // Stakes before
-    const stakeBefore = await pricelessCFDContract.stakes(
+    // Get amount of tokens
+    const preMintLongToken = await longTokenContract.balanceOf(
+      minterWallet1.address
+    );
+    const preMintShortToken = await shortTokenContract.balanceOf(
       minterWallet1.address
     );
 
-    // Process mint request
-    const tx = await pricelessCFDContract
+    // Mints 1 long and 1 short token
+    const reqMintTx = await pricelessCFDContract
       .connect(minterWallet1)
-      .processMintRequest(mintId);
-    await tx.wait();
+      .mint(daiDeposited);
 
-    // Make sure our stakes increased after minting
-    const stakeAfter = await pricelessCFDContract.stakes(minterWallet1.address);
+    await reqMintTx.wait();
 
-    console.log(stakeAfter)
-
-    expect(stakeAfter.longTokens.gt(stakeBefore.longTokens)).toBe(true);
-    expect(stakeAfter.shortTokens.gt(stakeBefore.shortTokens)).toBe(true);
-  });
-
-  test("requestMint, dispute(fail) and processMintId (minterWallet2)", async () => {
-    // The asset's price is initialized at 1 DAI,
-    // with leverage of 5,
-    // window of 600 seconds
-
-    // curRefAssetPrice is at 1.01 DAI
-    await getDaiFromUniswap(minterWallet2);
-
-    // As such, buying a longToken will be 1.05 DAI
-    //          buying a shortToken will be 0.95 DAI
-
-    // We want to deposit in 100 DAI and ETH equilavent
-    // (Note the excess ETH will be redunded)
-    const daiDeposited = ethers.utils.parseEther("100.0");
-    const curRefAssetPrice = ethers.utils.parseEther("1.01");
-    const expiration = getCurEpoch() + 120; // 2 mins in the future
-
-    // Approve contract to get funds from contract
-    await daiContract
-      .connect(minterWallet2)
-      .approve(pricelessCFDContract.address, daiDeposited);
-
-    // Request Mint Tx
-    const reqMintTx = await pricelessCFDContract
-      .connect(minterWallet2)
-      .requestMint(expiration, curRefAssetPrice, daiDeposited, {
-        value: ethers.utils.parseEther("1.0"),
-        gasLimit: 6000000,
-      });
-
-    const reqMintTxRecp = await reqMintTx.wait();
-    const reqMintEvent = reqMintTxRecp.events[1];
-    const mintId = reqMintEvent.args.mintId;
-    const mintRequest = await pricelessCFDContract.mintRequests(mintId);
-
-    // Dispute mint request
-    const disputeMintRequestFee = await pricelessCFDContract.disputeMintRequestFee();
-    await pricelessCFDContract
-      .connect(disputerWallet)
-      .disputeMintRequest(mintId, {
-        value: disputeMintRequestFee,
-        gasLimit: 6000000,
-      });
-
-    // Oracle set price to be valid with mintRequester
-    const identifier = await pricelessCFDContract.identifier();
-    await mockOracleContract
-      .connect(deployerWallet)
-      .pushPrice(identifier, mintRequest.mintTime, curRefAssetPrice);
-
-    // Stakes before
-    const stakeBefore = await pricelessCFDContract.stakes(
-      minterWallet2.address
+    // Check new balances
+    const postMintLongToken = await longTokenContract.balanceOf(
+      minterWallet1.address
+    );
+    const postMintShortToken = await shortTokenContract.balanceOf(
+      minterWallet1.address
     );
 
-    // Process mint request
-    const tx = await pricelessCFDContract
-      .connect(minterWallet2)
-      .processMintRequest(mintId, { gasLimit: 6000000 });
-    await tx.wait();
+    const tokenMintedLong = postMintLongToken.sub(preMintLongToken);
+    const tokenMintedShort = postMintShortToken.sub(preMintShortToken);
 
-    // Make sure our stakes increased after minting
-    const stakeAfter = await pricelessCFDContract.stakes(minterWallet2.address);
+    expect(postMintLongToken.gt(preMintLongToken)).toBe(true);
+    expect(postMintShortToken.gt(preMintShortToken)).toBe(true);
+    expect(tokenMintedLong.eq(tokenMintedShort)).toBe(true);
 
-    expect(stakeAfter.longTokens.gt(stakeBefore.longTokens)).toBe(true);
-    expect(stakeAfter.shortTokens.gt(stakeBefore.shortTokens)).toBe(true);
-  });
+    // Redeem tokens
+    await longTokenContract
+      .connect(minterWallet1)
+      .approve(pricelessCFDContract.address, tokenMintedLong);
+    await shortTokenContract
+      .connect(minterWallet1)
+      .approve(pricelessCFDContract.address, tokenMintedShort);
 
-  test("requestMint, dispute(success) and processMintId (minterWallet3)", async () => {
-    // The asset's price is initialized at 1 DAI,
-    // with leverage of 5,
-    // window of 600 seconds
+    const reqRedeemTx = await pricelessCFDContract
+      .connect(minterWallet1)
+      .redeem(tokenMintedLong);
 
-    // curRefAssetPrice is at 1.01 DAI
-    await getDaiFromUniswap(minterWallet3);
+    await reqRedeemTx.wait();
 
-    // As such, buying a longToken will be 1.05 DAI
-    //          buying a shortToken will be 0.95 DAI
-
-    // We want to deposit in 100 DAI and ETH equilavent
-    // (Note the excess ETH will be redunded)
-    const daiDeposited = ethers.utils.parseEther("100.0");
-    const curInvalidRefAssetPrice = ethers.utils.parseEther("1.01");
-    const curValidRefAssetPrice = ethers.utils.parseEther("1.03");
-    const expiration = getCurEpoch() + 120; // 2 mins in the future
-
-    // Approve contract to get funds from contract
-    await daiContract
-      .connect(minterWallet3)
-      .approve(pricelessCFDContract.address, daiDeposited);
-
-    // Request Mint Tx
-    const reqMintTx = await pricelessCFDContract
-      .connect(minterWallet3)
-      .requestMint(expiration, curInvalidRefAssetPrice, daiDeposited, {
-        value: ethers.utils.parseEther("1.0"),
-        gasLimit: 6000000,
-      });
-
-    const reqMintTxRecp = await reqMintTx.wait();
-    const reqMintEvent = reqMintTxRecp.events[1];
-    const mintId = reqMintEvent.args.mintId;
-    const mintRequest = await pricelessCFDContract.mintRequests(mintId);
-
-    // Dispute mint request
-    const disputeMintRequestFee = await pricelessCFDContract.disputeMintRequestFee();
-    await pricelessCFDContract
-      .connect(disputerWallet)
-      .disputeMintRequest(mintId, {
-        value: disputeMintRequestFee,
-        gasLimit: 6000000,
-      });
-
-    // Oracle set price to be valid with mintRequester
-    const identifier = await pricelessCFDContract.identifier();
-    await mockOracleContract
-      .connect(deployerWallet)
-      .pushPrice(identifier, mintRequest.mintTime, curValidRefAssetPrice);
-
-    // Stakes before
-    const stakeBefore = await pricelessCFDContract.stakes(
-      minterWallet3.address
+    // DAI Balance should be exactly the same prior to minting
+    const postRedeemDaiBalContract = await daiContract.balanceOf(
+      pricelessCFDContract.address
     );
 
-    // Process mint request
-    const tx = await pricelessCFDContract
-      .connect(minterWallet3)
-      .processMintRequest(mintId, { gasLimit: 6000000 });
-    await tx.wait();
-
-    // Make sure our stakes increased after minting
-    const stakeAfter = await pricelessCFDContract.stakes(minterWallet3.address);
-
-    expect(stakeAfter.longTokens.eq(stakeBefore.longTokens)).toBe(true);
-    expect(stakeAfter.shortTokens.eq(stakeBefore.shortTokens)).toBe(true);
+    expect(initialDaiBalContract.eq(postRedeemDaiBalContract)).toBe(true);
   });
 });

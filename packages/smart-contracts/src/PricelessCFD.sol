@@ -37,7 +37,9 @@ contract PricelessCFD {
     Token public longToken;
     Token public shortToken;
 
-    IBFactory public bFactory = IBFactory(0x9424B1412450D0f8Fc2255FAf6046b98213B76Bd);
+    IBFactory public bFactory = IBFactory(
+        0x9424B1412450D0f8Fc2255FAf6046b98213B76Bd
+    );
     IBPool public bPool;
     IERC20 public daiToken = IERC20(0x6B175474E89094C44Da98b954EedeAC495271d0F);
 
@@ -86,31 +88,7 @@ contract PricelessCFD {
     /***********************************
         Liquidity providers
     ************************************/
-    struct MintRequest {
-        address minter;
-        uint256 mintTime;
-        uint256 refAssetPriceAtMint;
-        uint256 longInDaiDeposited; // Long token in DAI
-        uint256 shortInDaiDeposited; // Short token in DAI
-        bool processed; // Has the mint request been processed
-        Status status; // State of the mint request
-        address disputer; // Person who is disputing a liquidation
-    }
-
-    // Each mint request needs to wait for ~mintRequestDisputablePeriod
-    // before users can process it (in seconds)
-    // TODO: Change this when not testing
-    uint256 public mintRequestDisputablePeriod = 0;
-
-    // Collateral needed to dispute a mint request (0.1 ETH)
-    uint256 public disputeMintRequestFee = 1e17;
-
-    // MintId => MintRequest
-    mapping(uint256 => MintRequest) public mintRequests;
-
-    event MintRequested(uint256 mintId, address minter);
-    event DisputeMintRequested(uint256 mintId, address disputer);
-    event MintProcessed(uint256 mintId, address minter);
+    event Minted(uint256 mintAmount);
 
     struct SettleRequest {
         address settler;
@@ -228,215 +206,49 @@ contract PricelessCFD {
         Liquidity providers
     ************************************/
 
-    // Submits a mint request
-    // Will need to approve a similar amount of DAI w.r.t ETH supplied
-    function requestMint(
-        uint256 expiration,
-        uint256 curRefAssetPrice,
-        uint256 daiDeposited
-    ) external payable notInSettlementPeriod returns (uint256) {
-        // Make sure liquidity provider is valid
-        if (expiration > now.add(window)) {
-            revert("Expiration time too long");
-        }
-        if (now > expiration) {
-            revert("Minting expired");
-        }
-
-        // 1. Calculate ETH equilavent in DAI
-        // Using a single wei here means 0 slippage and allows pricing from low liq pool
-        // extrapolate to base 1e18 in order to do calcs
+    // Mints a token
+    function mint(uint256 daiDeposited)
+        external
+        notInSettlementPeriod
+        returns (uint256)
+    {
+        // 1. Get underlying backing DAI
         require(
             daiToken.transferFrom(msg.sender, address(this), daiDeposited),
             "Transfer DAI for requestMint failed"
         );
 
-        // 2. Calculate the value of the tokens in ETH
-        (
-            uint256 longTokenInDai,
-            uint256 shortTokenInDai
-        ) = getDaiCollateralRequirements(daiDeposited, curRefAssetPrice);
+        // 2. Calculate number of tokens to mint Note:
+        // 1 * (Long + Short) = (refAssetOpeningPrice - refAssetPriceMaxDelta) + (refAssetOpeningPrice + refAssetPriceMaxDelta)
+        // Therefore, number of minted tokens = daiDeposited / ((refAssetOpeningPrice - refAssetPriceMaxDelta) + (refAssetOpeningPrice + refAssetPriceMaxDelta))
+        uint256 floorPrice = refAssetOpeningPrice.sub(refAssetPriceMaxDelta);
+        uint256 ceilPrice = refAssetOpeningPrice.add(refAssetPriceMaxDelta);
 
-        // 3. Create a mint request
-        MintRequest memory mintRequest = MintRequest({
-            minter: msg.sender,
-            mintTime: now,
-            refAssetPriceAtMint: curRefAssetPrice,
-            longInDaiDeposited: longTokenInDai,
-            shortInDaiDeposited: shortTokenInDai,
-            processed: false,
-            status: Status.PreDispute,
-            disputer: address(0)
-        });
+        uint256 tokensToMint = daiDeposited.divPrecisely(
+            floorPrice.add(ceilPrice)
+        );
 
-        mintRequests[curMintId] = mintRequest;
-
-        emit MintRequested(curMintId, msg.sender);
-
-        // Bump mint request
-        curMintId = curMintId + 1;
-
-        return curMintId - 1;
+        // 3. Mint tokens to user
+        longToken.mint(address(msg.sender), tokensToMint);
+        shortToken.mint(address(msg.sender), tokensToMint);
     }
 
-    function disputeMintRequest(uint256 mintId)
-        public
-        payable
-        notInSettlementPeriod
-    {
-        MintRequest storage mintRequest = mintRequests[mintId];
+    // Redeems tokens
+    function redeem(uint256 redeemAmount) public notInSettlementPeriod {
+        // Burn long and short token
+        longToken.burnFrom(msg.sender, redeemAmount);
+        shortToken.burnFrom(msg.sender, redeemAmount);
 
-        require(msg.value >= disputeMintRequestFee, "Lacking fee to dispute!");
+        // Calculate Payout $ to user
+        uint256 floorPrice = refAssetOpeningPrice.sub(refAssetPriceMaxDelta);
+        uint256 ceilPrice = refAssetOpeningPrice.add(refAssetPriceMaxDelta);
 
-        require(
-            mintRequest.processed == false,
-            "Mint request has been processed!"
-        );
-        require(
-            mintRequest.status == Status.PreDispute,
-            "Mint request is already in dispute!"
+        uint256 daiToRefund = redeemAmount.mulTruncate(
+            floorPrice.add(ceilPrice)
         );
 
-        // Refund access fee
-        if (msg.value > disputeMintRequestFee) {
-            msg.sender.call.value(msg.value.sub(disputeMintRequestFee))("");
-        }
-
-        // Set dispute status
-        mintRequest.disputer = msg.sender;
-        mintRequest.status = Status.PendingDispute;
-
-        // Request price from Oracle
-        oracle.requestPrice(identifier, mintRequest.mintTime);
-
-        emit DisputeMintRequested(mintId, msg.sender);
-    }
-
-    function processMintRequest(uint256 mintId) public notInSettlementPeriod {
-        MintRequest storage mintRequest = mintRequests[mintId];
-
-        // Make sure only mintRequest hasn't been processed yet
-        require(
-            mintRequest.processed == false,
-            "Mint request has been processed!"
-        );
-
-        // Make sure only mintRequest is at the very least initialized
-        require(
-            mintRequest.status != Status.Uninitialized,
-            "Mint request has not been initialized!"
-        );
-
-        // If the mint request is predisputed, make sure the mint request is "mature" enough
-        if (mintRequest.status == Status.PreDispute) {
-            require(
-                mintRequest.mintTime.add(mintRequestDisputablePeriod) <= now,
-                "Mint request still in disputable period!"
-            );
-        }
-
-        // If the mint request is still pending dispute,
-        // Check the oracle price, and update it if necessary
-        if (mintRequest.status == Status.PendingDispute) {
-            if (oracle.hasPrice(identifier, mintRequest.mintTime)) {
-                uint256 oraclePrice = uint256(
-                    oracle.getPrice(identifier, mintRequest.mintTime)
-                );
-
-                // If oracle price == mint price requested
-                // Then its valid, send dispute fees back to minter
-
-                // TODO: Maybe give it some lee-way?
-                if (mintRequest.refAssetPriceAtMint == oraclePrice) {
-                    mintRequest.status = Status.DisputeFailed;
-                    mintRequest.minter.call.value(disputeMintRequestFee)("");
-                } else {
-                    mintRequest.status = Status.DisputeSucceeded;
-
-                    // Minter loses their funds to disputer
-                    // TODO: In future disputer has to put up
-                    //       a proportional amount of collateral
-                    require(
-                        daiToken.transferFrom(
-                            address(this),
-                            mintRequest.disputer,
-                            mintRequest.longInDaiDeposited.add(
-                                mintRequest.shortInDaiDeposited
-                            )
-                        ),
-                        "Transfer DAI for requestMint failed"
-                    );
-                }
-            }
-        }
-
-        // If we have reached it so far, it means that its a valid mint request
-        if (
-            mintRequest.status == Status.PreDispute ||
-            mintRequest.status == Status.DisputeFailed
-        ) {
-            _processMintRequestSuccess(mintId);
-        }
-    }
-
-    function _processMintRequestSuccess(uint256 mintId) internal {
-        MintRequest storage mintRequest = mintRequests[mintId];
-
-        uint256 daiDeposited = mintRequest.shortInDaiDeposited.add(
-            mintRequest.longInDaiDeposited
-        );
-
-        // 1. Mint the long/short tokens for the synthetic asset
-        longToken.mint(address(this), mintRequest.longInDaiDeposited);
-        shortToken.mint(address(this), mintRequest.shortInDaiDeposited);
-
-        // 2. Contribute to Balancer Pool and rebind weights
-        bPool.rebind(
-            address(daiToken),
-            bPool.getBalance(address(daiToken)).add(daiDeposited),
-            25e18
-        );
-
-        uint256 longBal = bPool.getBalance(address(longToken)).add(
-            mintRequest.longInDaiDeposited
-        );
-        uint256 longDenorm = mintRequest
-            .longInDaiDeposited
-            .divPrecisely(daiDeposited)
-            .mulTruncate(25e18);
-
-        uint256 shortBal = bPool.getBalance(address(shortToken)).add(
-            mintRequest.shortInDaiDeposited
-        );
-        uint256 shortDenorm = mintRequest
-            .shortInDaiDeposited
-            .divPrecisely(daiDeposited)
-            .mulTruncate(25e18);
-
-        // Needs to reset denorm value otherwise a `ERR_MAX_TOTAL_WEIGHT` will be thrown
-        bPool.rebind(address(longToken), longBal, 1e18);
-        bPool.rebind(address(shortToken), shortBal, 1e18);
-
-        bPool.rebind(address(longToken), longBal, longDenorm);
-        bPool.rebind(address(shortToken), shortBal, shortDenorm);
-
-        // 3. Save total mint volume in ETH
-        totalMintVolumeInDai = totalMintVolumeInDai.add(daiDeposited);
-
-        // 4. Save to staker's profile
-        stakes[mintRequest.minter] = Stake({
-            longTokens: stakes[mintRequest.minter].longTokens.add(
-                mintRequest.longInDaiDeposited
-            ),
-            shortTokens: stakes[mintRequest.minter].shortTokens.add(
-                mintRequest.shortInDaiDeposited
-            ),
-            liquidated: false
-        });
-
-        // 5. Mark mint request as processed and emit event
-        mintRequest.processed = true;
-        emit MintProcessed(mintId, mintRequest.minter);
+        // $$ to User
+        require(daiToken.transfer(msg.sender, daiToRefund), "Redeem failed");
     }
 
     function requestSettle() public payable notInSettlementPeriod {
@@ -551,60 +363,6 @@ contract PricelessCFD {
                 curSettleRequest.settler,
                 curSettleRequest.time
             );
-        }
-    }
-
-    function getDaiCollateralRequirements(
-        uint256 daiDeposited,
-        uint256 curRefAssetPrice
-    ) public view returns (uint256, uint256) {
-        // Get (leverage) rates for long/short token, according to the
-        // supplied reference price
-        (
-            uint256 longRatePercentage,
-            uint256 shortRatePercentage
-        ) = getLongShortRates(curRefAssetPrice);
-
-        // Get DAI per Asset
-        return (
-            longRatePercentage.mulTruncate(daiDeposited),
-            shortRatePercentage.mulTruncate(daiDeposited)
-        );
-    }
-
-    // What are the current exchange rates for long/short token rates (in %)
-    function getLongShortRates(uint256 curRefAssetPrice)
-        public
-        view
-        returns (uint256, uint256)
-    {
-        bool priceIsPositive = curRefAssetPrice > refAssetOpeningPrice;
-
-        uint256 delta = priceIsPositive
-            ? curRefAssetPrice.sub(refAssetOpeningPrice)
-            : refAssetOpeningPrice.sub(curRefAssetPrice);
-
-        if (delta > refAssetPriceMaxDelta) {
-            // Users will have chance to dispute it
-            revert(
-                "Asset price has exceeded bounds, please call requestSettle instead"
-            );
-        }
-
-        uint256 deltaWithLeverage = delta.mulTruncate(leverage);
-
-        uint256 winRate = refAssetOpeningPrice.add(deltaWithLeverage);
-        uint256 loseRate = refAssetOpeningPrice.sub(deltaWithLeverage);
-
-        uint256 rate = winRate.add(loseRate);
-
-        uint256 winRatePercentage = winRate.divPrecisely(rate);
-        uint256 loseRatePercentage = loseRate.divPrecisely(rate);
-
-        if (priceIsPositive) {
-            return (winRatePercentage, loseRatePercentage);
-        } else {
-            return (loseRatePercentage, winRatePercentage);
         }
     }
 }
