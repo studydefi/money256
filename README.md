@@ -16,4 +16,6 @@ MAINNET_NODE_URL=https://mainnet.infura.io/v3/API_KEY_HERE
 
 2. Run `npm start` inside the `smart-contracts` package to start a chain forked from Mainnet.
 
+3. Run `npx truffle migrate --network development` to migrate the contracts to the chain.
+
 3. Run `npm test` inside the `smart-contracts` package to run the test.
