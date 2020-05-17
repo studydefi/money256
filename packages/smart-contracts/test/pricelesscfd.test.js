@@ -1,4 +1,4 @@
-require("dotenv").config();
+require('dotenv').config({ path: '../../.env' });
 const { ethers } = require("ethers");
 const { BigNumber } = require("ethers/utils/bignumber");
 

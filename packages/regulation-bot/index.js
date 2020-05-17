@@ -1,4 +1,4 @@
-require("dotenv").config();
+require('dotenv').config({ path: '../../.env' });
 const { ethers } = require("ethers");
 // const { legos } = require("@studydefi/money-legos");
 // const Promise = require("bluebird");
