@@ -1,3 +1,4 @@
+require("dotenv").config();
 const { ethers } = require("ethers");
 const { BigNumber } = require("ethers/utils/bignumber");
 
@@ -19,27 +20,27 @@ const provider = new ethers.providers.JsonRpcProvider(
 );
 
 const deployerWallet = new ethers.Wallet(
-  "0x4f3edf983ac636a65a842ce7c78d9aa706d3b113bce9c46f30d7d21715b23b1d",
+  process.env.PK_DEPLOYER,
   provider
 );
 
 const disputerWallet = new ethers.Wallet(
-  "0x6cbed15c793ce57650b9877cf6fa156fbef513c4e6134f022a85b1ffdd59b2a1",
+  process.env.PK_DISPUTER,
   provider
 );
 
 const minterWallet1 = new ethers.Wallet(
-  "0x646f1ce2fdad0e6deeeb5c7e8e5543bdde65e86029e2fd9fc169899c440a7913",
+  process.env.PK_MINTER_1,
   provider
 );
 
 const minterWallet2 = new ethers.Wallet(
-  "0xb0057716d5917badaf911b193b12b910811c1497b5bada8d7711f758981c3773",
+  process.env.PK_MINTER_2,
   provider
 );
 
 const genericWallet1 = new ethers.Wallet(
-  "0x829e924fdf021ba3dbbc4225edfece9aca04b929d6e75613329ca6f1d31c0bb4",
+  process.env.PK_GENERIC_1,
   provider
 );
 
