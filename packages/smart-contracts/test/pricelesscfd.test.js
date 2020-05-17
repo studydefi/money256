@@ -1,4 +1,4 @@
-require('dotenv').config({ path: '../../.env' });
+require("dotenv").config({ path: "../../.env" });
 const { ethers } = require("ethers");
 const { BigNumber } = require("ethers/utils/bignumber");
 
@@ -16,56 +16,41 @@ const sleep = (ms) => {
 };
 
 const provider = new ethers.providers.JsonRpcProvider(
-  process.env.PROVIDER_URL || "http://localhost:8545"
+  process.env.PROVIDER_URL || "http://localhost:8545",
 );
 
-const deployerWallet = new ethers.Wallet(
-  process.env.PK_DEPLOYER,
-  provider
-);
+const deployerWallet = new ethers.Wallet(process.env.PK_DEPLOYER, provider);
 
-const disputerWallet = new ethers.Wallet(
-  process.env.PK_DISPUTER,
-  provider
-);
+const disputerWallet = new ethers.Wallet(process.env.PK_DISPUTER, provider);
 
-const minterWallet1 = new ethers.Wallet(
-  process.env.PK_MINTER_1,
-  provider
-);
+const minterWallet1 = new ethers.Wallet(process.env.PK_MINTER_1, provider);
 
-const minterWallet2 = new ethers.Wallet(
-  process.env.PK_MINTER_2,
-  provider
-);
+const minterWallet2 = new ethers.Wallet(process.env.PK_MINTER_2, provider);
 
-const genericWallet1 = new ethers.Wallet(
-  process.env.PK_GENERIC_1,
-  provider
-);
+const genericWallet1 = new ethers.Wallet(process.env.PK_GENERIC_1, provider);
 
 const finderContract = new ethers.Contract(
   finderDef.networks["1"].address,
   finderDef.abi,
-  provider
+  provider,
 );
 
 const pricelessCFDContract = new ethers.Contract(
   pricelessCFDDef.networks["1"].address,
   pricelessCFDDef.abi,
-  provider
+  provider,
 );
 
 const mockOracleContract = new ethers.Contract(
   mockOracleDef.networks["1"].address,
   mockOracleDef.abi,
-  provider
+  provider,
 );
 
 const identifierWhitelistContract = new ethers.Contract(
   identifierWhitelistDef.networks["1"].address,
   identifierWhitelistDef.abi,
-  provider
+  provider,
 );
 
 const newERC20Contract = (x) =>
@@ -83,17 +68,17 @@ const getDaiFromUniswap = async (wallet) => {
   const uniswapFactory = new ethers.Contract(
     legos.uniswap.factory.address,
     legos.uniswap.factory.abi,
-    wallet
+    wallet,
   );
 
   const uniswapDaiAddress = await uniswapFactory.getExchange(
-    legos.erc20.dai.address
+    legos.erc20.dai.address,
   );
 
   const uniswapDaiExchange = new ethers.Contract(
     uniswapDaiAddress,
     legos.uniswap.exchange.abi,
-    wallet
+    wallet,
   );
 
   const futureEpoch = getCurEpoch() + 3600;
@@ -113,35 +98,39 @@ beforeAll(async () => {
     .connect(deployerWallet)
     .transfer(pricelessCFDContract.address, "2000000");
 
-  // Initialize Pool (need 2000000 WEI DAI)
+  // Initialize Pool (need 2000000 WEI of DAI)
   await pricelessCFDContract
     .connect(deployerWallet)
     .initPool({ gasLimit: 7000000 });
 
-  // Need to initialize pool first
+  // Get our identifier (should be "PricelessCFD")
   const identifier = await pricelessCFDContract.identifier();
 
+  // Add identifier to our IdentifierWhitelist contract
   await identifierWhitelistContract
     .connect(deployerWallet)
     .addSupportedIdentifier(identifier);
 
+  // Register our IdentifierWhitelist contract in the Finder
   await finderContract
     .connect(deployerWallet)
     .changeImplementationAddress(
       ethers.utils.formatBytes32String("IdentifierWhitelist"),
-      identifierWhitelistContract.address
+      identifierWhitelistContract.address,
     );
 
+  // Register our (Mock)Oracle contract in the Finder
   await finderContract
     .connect(deployerWallet)
     .changeImplementationAddress(
       ethers.utils.formatBytes32String("Oracle"),
-      mockOracleContract.address
+      mockOracleContract.address,
     );
 
+  // Initialize our long and short tokens
   longTokenContract = newERC20Contract(await pricelessCFDContract.longToken());
   shortTokenContract = newERC20Contract(
-    await pricelessCFDContract.shortToken()
+    await pricelessCFDContract.shortToken(),
   );
 });
 
@@ -151,7 +140,7 @@ describe("PricessCFD", () => {
 
     // Contract daiBalance
     const initialDaiBalContract = await daiContract.balanceOf(
-      pricelessCFDContract.address
+      pricelessCFDContract.address,
     );
 
     // We deployed the contract at ref price of 1 DAI
@@ -167,10 +156,10 @@ describe("PricessCFD", () => {
 
     // Get amount of tokens
     const preMintLongToken = await longTokenContract.balanceOf(
-      minterWallet1.address
+      minterWallet1.address,
     );
     const preMintShortToken = await shortTokenContract.balanceOf(
-      minterWallet1.address
+      minterWallet1.address,
     );
 
     // Mints 1 long and 1 short token
@@ -182,10 +171,10 @@ describe("PricessCFD", () => {
 
     // Check new balances
     const postMintLongToken = await longTokenContract.balanceOf(
-      minterWallet1.address
+      minterWallet1.address,
     );
     const postMintShortToken = await shortTokenContract.balanceOf(
-      minterWallet1.address
+      minterWallet1.address,
     );
 
     const tokenMintedLong = postMintLongToken.sub(preMintLongToken);
@@ -211,7 +200,7 @@ describe("PricessCFD", () => {
 
     // DAI Balance should be exactly the same prior to minting
     const postRedeemDaiBalContract = await daiContract.balanceOf(
-      pricelessCFDContract.address
+      pricelessCFDContract.address,
     );
 
     expect(initialDaiBalContract.eq(postRedeemDaiBalContract)).toBe(true);
@@ -266,13 +255,13 @@ describe("PricessCFD", () => {
       .connect(genericWallet1)
       .approve(
         pricelessCFDContract.address,
-        await longTokenContract.balanceOf(genericWallet1.address)
+        await longTokenContract.balanceOf(genericWallet1.address),
       );
     await shortTokenContract
       .connect(genericWallet1)
       .approve(
         pricelessCFDContract.address,
-        await shortTokenContract.balanceOf(genericWallet1.address)
+        await shortTokenContract.balanceOf(genericWallet1.address),
       );
 
     await pricelessCFDContract.connect(genericWallet1).redeemFinal();
