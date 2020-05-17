@@ -180,11 +180,12 @@ describe("PricessCFD", () => {
     const tokenMintedLong = postMintLongToken.sub(preMintLongToken);
     const tokenMintedShort = postMintShortToken.sub(preMintShortToken);
 
+    // Confirm that we minted long and short tokens (in equal amounts)
     expect(postMintLongToken.gt(preMintLongToken)).toBe(true);
     expect(postMintShortToken.gt(preMintShortToken)).toBe(true);
     expect(tokenMintedLong.eq(tokenMintedShort)).toBe(true);
 
-    // Redeem tokens
+    // Redeem minted tokens
     await longTokenContract
       .connect(minterWallet1)
       .approve(pricelessCFDContract.address, tokenMintedLong);
