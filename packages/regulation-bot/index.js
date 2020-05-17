@@ -1,3 +1,4 @@
+require('dotenv').config({ path: '../../.env' });
 const { ethers } = require("ethers");
 // const { legos } = require("@studydefi/money-legos");
 // const Promise = require("bluebird");
@@ -14,7 +15,7 @@ const provider = new ethers.providers.JsonRpcProvider(
 );
 
 const wallet = new ethers.Wallet(
-  "0x829e924fdf021ba3dbbc4225edfece9aca04b929d6e75613329ca6f1d31c0bb4",
+  process.env.PK_GENERIC_1,
   provider
 );
 
