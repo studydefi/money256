@@ -2098,7 +2098,7 @@
   dependencies:
     type-detect "4.0.8"
 
-"@studydefi/money-legos@^2.1.0":
+"@studydefi/money-legos@^2.1.0", "@studydefi/money-legos@^2.1.3":
   version "2.1.3"
   resolved "https://registry.yarnpkg.com/@studydefi/money-legos/-/money-legos-2.1.3.tgz#eb1e145d6c6585b6f7d471622f515d1e24274fb6"
   integrity sha512-6I8V3P2uFDxW9dXoq8O91JQS6YRZ2OmduJzD+grkpAnkXocT7eu4t26zCDwBFRD2bHLlEZyopWZ87GNuO8Mf8w==
