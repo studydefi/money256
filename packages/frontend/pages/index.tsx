@@ -10,25 +10,18 @@ export default () => (
   <>
     <Title>Money256</Title>
     <p>A priceless CFD example</p>
-    <p>'mint' button (which calls the mint function in PricelessCFD</p>
+    <p>Mint by pooling DAI into the PricelessCFD contract:</p>
     <div>
       <button>Mint</button>
     </div>
-    <p>A table to preview the long/short tokens you haev</p>
-    <div>Insert table here</div>
-    <p>A table to view when this PricelessCFD is gonna expire</p>
-    <div>Insert table here</div>
-    <p>
-      A button to redeem back 1 long + 1 short tokens for DAI ('redeem'
-      function)
-    </p>
+    <p>Tokens you own: 4 long / 2 short</p>
+    <p>Current CFD expiry date: 2020-06-01 12:00:00</p>
     <div>
-      Redeem for minters (i.e. you have equal amount of long/short tokens)
-      <button>Redeem</button>
+      Redeem for minters (i.e. you must have equal amount of long/short tokens). Can be done anytime before settlement/expiry.
     </div>
-    <p>A redeemFinal function so ppl can redeem after expiration</p>
+      <div><button>Redeem</button></div>
     <div>
-      Redeem for everyone else after settlement<button>Redeem</button>
+      Redeem all long/short tokens you own (after settlement/expiry): <button>Redeem</button>
     </div>
   </>
 );
