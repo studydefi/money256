@@ -1,5 +1,15 @@
 # money256
-Entry to hackmoney
+Entry to hack-money.
+
+This project builds on top of [UpSideDai](https://github.com/Daichotomy/UpSideDai) to create a [CFD](https://en.wikipedia.org/wiki/Contract_for_difference) that is:
+
+1. Leveraged
+2. Fully backed by some collateral (e.g. DAI) at every given step
+3. Priceless (i.e. does not require a live price feed)
+
+This Priceless CFD project can be seen as an "optimistic" CFD that is also leveraged, and fully backed by collateral. Should the CFD contract exceed the price boundary then a settlement request can be submitted. That request can also be disputed (usually by bots), and everyone is incentivized to report back the correct value of the underlying in order to prevent being penalized.
+
+This repo is a proof of concept.
 
 ## Setup
 
