@@ -1,7 +1,7 @@
 # money256
-Entry to hack-money.
+An entry for the [HackMoney](https://hackathon.money/) hackathon.
 
-This project builds on top of [UpSideDai](https://github.com/Daichotomy/UpSideDai) to create a [CFD](https://en.wikipedia.org/wiki/Contract_for_difference) that is:
+This project builds on top of [UpSideDai](https://github.com/Daichotomy/UpSideDai)'s concepts to create a [CFD](https://en.wikipedia.org/wiki/Contract_for_difference) that is:
 
 1. Leveraged
 2. Fully backed by some collateral (e.g. DAI) at every given step
@@ -10,6 +10,17 @@ This project builds on top of [UpSideDai](https://github.com/Daichotomy/UpSideDa
 This Priceless CFD project can be seen as an "optimistic" CFD that is also leveraged, and fully backed by collateral. Should the CFD contract exceed the price boundary then a settlement request can be submitted. That request can also be disputed (usually by bots), and everyone is incentivized to report back the correct value of the underlying in order to prevent being penalized.
 
 This repo is a proof of concept.
+
+## How it's made
+
+This project uses React + Next.js for the frontend, Truffle to compile the contracts, Solidity for the contract source code, and a bunch of code from UMA to mimic their "priceless" system, e.g.
+
+1. Mock Oracles
+2. Finder
+3. Whitelist
+4. Identifiers
+
+The bot is written in Node.js using Ethers.js with a pub/sub method to listen to events.
 
 ## Setup
 
