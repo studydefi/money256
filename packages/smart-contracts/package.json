@@ -10,7 +10,7 @@
     "start": "node chain.js"
   },
   "dependencies": {
-    "@openzeppelin/contracts": "^2.5.1",
+    "@openzeppelin/contracts": "^4.4.2",
     "@truffle/hdwallet-provider": "^1.0.34"
   },
   "devDependencies": {
